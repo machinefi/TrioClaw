@@ -23,6 +23,9 @@ import (
 
 	"github.com/machinefi/trioclaw/internal/capture"
 	"github.com/machinefi/trioclaw/internal/gateway"
+	pluginpkg "github.com/machinefi/trioclaw/internal/plugin"
+	"github.com/machinefi/trioclaw/internal/plugin/execplugin"
+	ha "github.com/machinefi/trioclaw/internal/plugin/homeassistant"
 	"github.com/machinefi/trioclaw/internal/state"
 	"github.com/machinefi/trioclaw/internal/vision"
 	"github.com/spf13/cobra"
@@ -136,6 +139,9 @@ func runPair(ctx context.Context) error {
 // =============================================================================
 
 var runCameras []string // additional camera sources (rtsp:// or device paths)
+var runHAURL string     // Home Assistant URL
+var runHAToken string   // Home Assistant long-lived access token
+var runPluginDir string // custom plugin scripts directory
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -176,6 +182,33 @@ func runRun(ctx context.Context) error {
 
 	// Create handler
 	handler := gateway.NewHandler(devices, trioClient, runCameras)
+
+	// Setup plugins (Hands)
+	registry := pluginpkg.NewRegistry()
+
+	// Home Assistant plugin
+	if runHAURL != "" && runHAToken != "" {
+		haPlugin := ha.New(runHAURL, runHAToken)
+		if err := registry.Register(haPlugin); err != nil {
+			return fmt.Errorf("failed to register HA plugin: %w", err)
+		}
+		fmt.Printf("  + Home Assistant: %s\n", runHAURL)
+	}
+
+	// Exec plugin (user scripts)
+	execPlugin, err := execplugin.New(runPluginDir)
+	if err != nil {
+		fmt.Printf("Warning: exec plugin init failed: %v\n", err)
+	} else {
+		if err := registry.Register(execPlugin); err != nil {
+			fmt.Printf("Warning: failed to register exec plugin: %v\n", err)
+		}
+		if execPlugin.ScriptCount() > 0 {
+			fmt.Printf("  + Exec plugins: %d script(s)\n", execPlugin.ScriptCount())
+		}
+	}
+
+	handler.SetPlugins(registry)
 
 	// Create client
 	client := gateway.NewClient(st.GatewayURL, st.Token)
@@ -547,6 +580,9 @@ func init() {
 
 	// run command flags
 	runCmd.Flags().StringArrayVar(&runCameras, "camera", nil, "Additional camera source (rtsp:// URL or device path)")
+	runCmd.Flags().StringVar(&runHAURL, "ha-url", "", "Home Assistant URL (e.g. http://homeassistant.local:8123)")
+	runCmd.Flags().StringVar(&runHAToken, "ha-token", "", "Home Assistant long-lived access token")
+	runCmd.Flags().StringVar(&runPluginDir, "plugin-dir", "", "Directory for exec plugin scripts (default: ~/.trioclaw/plugins/)")
 
 	// snap command flags
 	snapCmd.Flags().StringVar(&snapCamera, "camera", "", "Camera source (default: built-in webcam)")
@@ -563,12 +599,14 @@ func init() {
 
 // nodeCapabilities returns caps and commands to advertise during pairing.
 func nodeCapabilities() (caps []string, commands []string) {
-	caps = []string{"camera"}
+	caps = []string{"camera", "device"}
 	commands = []string{
 		"camera.snap",
 		"camera.list",
 		"camera.clip",
 		"vision.analyze",
+		"device.list",
+		"device.control",
 	}
 	return
 }

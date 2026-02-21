@@ -181,6 +181,17 @@ type VisionAnalyzeResult struct {
 }
 
 // =============================================================================
+// Device control invoke params (TrioClaw "Hands" commands)
+// =============================================================================
+
+// DeviceControlParams is the params for "device.control" invoke.
+type DeviceControlParams struct {
+	DeviceID string         `json:"deviceId"` // "ha:light.living_room" or "exec:my-script/desk-lamp"
+	Action   string         `json:"action"`   // "turn_on", "turn_off", "lock", "set_temperature", etc.
+	Params   map[string]any `json:"params"`   // action-specific params (e.g. {"brightness": 200})
+}
+
+// =============================================================================
 // Utility: encode/decode frames
 // =============================================================================
 
