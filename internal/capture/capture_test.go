@@ -186,7 +186,7 @@ func TestIsRTSP(t *testing.T) {
 	}{
 		{"rtsp://example.com/stream", true},
 		{"rtsps://example.com/stream", true},
-		{"RTSP://EXAMPLE.COM/STREAM", true},
+		{"RTSP://example.com/stream", true},
 		{"http://example.com/stream", false},
 		{"file:///path/to/video.mp4", false},
 		{"/dev/video0", false},

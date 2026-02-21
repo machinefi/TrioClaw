@@ -93,6 +93,11 @@ func (h *Handler) handleCameraSnap(ctx context.Context, req InvokeRequest) Invok
 		source = "0"
 	}
 
+	// Check if source is an extra camera (RTSP URL)
+	if isExtraCameraID(source) {
+		source = h.GetExtraCameraSource(source)
+	}
+
 	// Capture frame
 	frame, err := capture.CaptureFrameCtx(ctx, source)
 	if err != nil {
@@ -201,6 +206,11 @@ func (h *Handler) handleCameraClip(ctx context.Context, req InvokeRequest) Invok
 		source = "0"
 	}
 
+	// Check if source is an extra camera (RTSP URL)
+	if isExtraCameraID(source) {
+		source = h.GetExtraCameraSource(source)
+	}
+
 	// Record clip
 	clip, err := capture.RecordClip(source, durationMs)
 	if err != nil {
@@ -271,6 +281,11 @@ func (h *Handler) handleVisionAnalyze(ctx context.Context, req InvokeRequest) In
 	source := params.DeviceID
 	if source == "" {
 		source = "0"
+	}
+
+	// Check if source is an extra camera (RTSP URL)
+	if isExtraCameraID(source) {
+		source = h.GetExtraCameraSource(source)
 	}
 
 	// Capture frame

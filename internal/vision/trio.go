@@ -26,7 +26,7 @@ const DefaultTrioAPIURL = "https://trio.machinefi.com"
 const (
 	defaultTimeout   = 30 * time.Second
 	healthCheckPath  = "/healthz"
-	checkOncePath    = "/api/v1/check-once"
+	checkOncePath    = "/check-once"
 )
 
 // TrioClient is an HTTP client for the Trio API.

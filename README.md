@@ -1,163 +1,262 @@
-# TrioClaw
+<p align="center">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/trioclaw-banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/trioclaw-banner-light.svg">
+    <img src="docs/assets/trioclaw-banner-dark.svg" alt="TrioClaw — Eyes, ears, voice & hands for AI agents" width="600">
+  </picture>
+</p>
 
-> Give any AI agent eyes, ears, and senses. A lightweight, cross-platform node that connects cameras, microphones, and smart devices to [OpenClaw](https://github.com/openclaw/openclaw).
+<p align="center">
+  An <a href="https://github.com/openclaw/openclaw">OpenClaw</a> node that connects cameras, microphones, speakers, and smart devices<br>so your AI agent can see, hear, speak, and act in the real world.
+</p>
 
-## What Is TrioClaw?
+<p align="center">
+  <a href="https://github.com/machinefi/trioclaw/actions"><img src="https://img.shields.io/github/actions/workflow/status/machinefi/trioclaw/ci.yml?branch=main&style=for-the-badge" alt="CI"></a>
+  <a href="https://github.com/machinefi/trioclaw/releases"><img src="https://img.shields.io/github/v/release/machinefi/trioclaw?include_prereleases&style=for-the-badge" alt="Release"></a>
+  <a href="https://goreportcard.com/report/github.com/machinefi/trioclaw"><img src="https://goreportcard.com/badge/github.com/machinefi/trioclaw?style=for-the-badge" alt="Go Report"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://discord.gg/clawd"><img src="https://img.shields.io/discord/1456350064065904867?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
+</p>
 
-TrioClaw is a complete sensory system for AI agents. It provides:
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="DESIGN.md">Design Doc</a> ·
+  <a href="SKILL.md">Skill Spec</a> ·
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="https://discord.gg/clawd">Discord</a>
+</p>
 
-- **Vision** — camera capture + VLM analysis via Trio API
-- **Hearing** — microphone capture + speech-to-text (via Whisper API, Phase 2)
-- **Voice** — text-to-speech playback via espeak/macOS `say` (Phase 2)
+---
 
-It runs as a single Go binary on your machine. On one side it connects to local devices (cameras, microphones, speakers). On the other side it connects to an OpenClaw Gateway. The AI agent sees, hears, and speaks through TrioClaw.
+## The Four Senses
 
-All heavy AI processing happens in the cloud — TrioClaw itself is thin. It captures frames and audio locally, sends them to cloud APIs for understanding, and relays results to Gateway.
+```
+👁  Eyes   — Camera  → ffmpeg → Trio API (VLM)    → "I see a delivery person"
+👂  Ears   — Mic     → ffmpeg → Whisper API (STT)  → "User said: check the door"
+🗣  Mouth  — Speaker ← espeak / say                ← "There's a package outside"
+🤚  Hands  — Devices ← plugin command              ← "Turning on porch light"
+```
 
-### Compared to ClawGo
+TrioClaw is a single Go binary. One side connects to local hardware (cameras, microphones, speakers, smart devices). The other side connects to an [OpenClaw Gateway](https://github.com/openclaw/openclaw). All heavy AI processing happens in the cloud — TrioClaw itself is thin.
 
-[ClawGo](https://github.com/openclaw/clawgo) gave OpenClaw ears and a voice. TrioClaw is its superset — adding vision on top of the same STT/TTS pattern:
+| Sense | Device | Cloud API | Status |
+|-------|--------|-----------|--------|
+| **Eyes** | Webcam, USB camera, RTSP/IP camera | [Trio API](https://trio.machinefi.com) (VLM) | **Ready** |
+| **Ears** | Built-in mic, USB mic | Whisper API (STT) | Phase 2 |
+| **Mouth** | System speaker | espeak-ng / macOS `say` (TTS) | Phase 2 |
+| **Hands** | Smart lights, locks, switches, GPIO | Plugin system | Phase 3 |
 
-| Capability      | ClawGo          | TrioClaw               |
-|-----------------|-----------------|-------------------------|
-| Ears (STT)      | Whisper API      | Whisper API (same approach) |
-| Mouth (TTS)      | espeak subprocess| espeak / macOS `say` (same approach) |
-| Eyes (Vision)    | -               | Trio API (VLM)          |
-| Devices          | Microphone only  | Camera + Mic + RTSP + future IoT |
-| Processing       | All local       | All in cloud (Trio API)   |
+### Why TrioClaw?
 
-The STT and TTS code follows the exact same subprocess pattern as ClawGo. No magic — just `ffmpeg` for capture, cloud APIs for understanding, and subprocess calls for playback.
+[ClawGo](https://github.com/openclaw/clawgo) gave OpenClaw **ears and a voice**. TrioClaw adds **eyes and hands** — and wraps it all in a plugin system anyone can extend.
+
+| | ClawGo | TrioClaw |
+|---|--------|----------|
+| Eyes | — | Trio API (VLM) |
+| Ears | Whisper | Whisper (same) |
+| Mouth | espeak | espeak / `say` (same) |
+| Hands | — | Plugin system |
+| Devices | Mic only | Camera + Mic + RTSP + IoT |
+| Standalone | No | Yes |
+| Plugins | No | Yes |
+
+---
 
 ## Quick Start
 
+**Prerequisites:** [ffmpeg](https://ffmpeg.org/) installed on your system.
+
 ```bash
-# Install (single binary, no runtime dependencies)
+# Install
 curl -sSL https://get.trioclaw.com | sh
 
-# Check that everything works
+# Verify everything works
 trioclaw doctor
+# ✓ ffmpeg: 6.1.1
+# ✓ Camera: FaceTime HD Camera
+# ✓ Microphone: MacBook Pro Microphone
+# ✓ Trio API: https://trio.machinefi.com
+# ✗ Gateway: not paired
 
 # Pair with your OpenClaw Gateway (one-time)
 trioclaw pair --gateway ws://192.168.1.100:18789
 
-# Run as a node (camera + mic + speaker)
+# Start the node
 trioclaw run --camera rtsp://192.168.1.50/stream1
 ```
 
-Then talk to your OpenClaw agent:
+Then, in OpenClaw:
 
 ```
 You:   "What do you see on the front door camera?"
 Agent: "The front porch is empty. No one is there."
 
 You:   "Watch for deliveries and let me know."
-Agent: "I'll keep an eye on it. I'll message you when a package arrives."
+Agent: "I'll keep an eye on it."
 
-... 30 min later ...
+       ... 30 min later ...
 
 Agent: "A delivery person just left a package at your front door."
-       (spoken aloud through your speaker if TTS is enabled)
+
+You:   "Turn on the porch light."
+Agent: "Done. Porch light is on."
 ```
 
-## Standalone Mode (no OpenClaw needed)
+### Standalone Mode
+
+Works without OpenClaw — no Gateway needed:
 
 ```bash
+# One-shot: snap + ask
+trioclaw snap --analyze "what do you see?"
+
+# Watch mode: monitor + webhook
 trioclaw watch rtsp://192.168.1.50/stream1 \
   --when "is there a package at the door?" \
   --webhook https://hooks.slack.com/services/xxx
 ```
 
-## Supported Devices
-
-| Device Type          | Access Method               | Description                      |
-|---------------------|----------------------------|----------------------------------|
-| Built-in webcam     | ffmpeg avfoundation/v4l2/dshow | Auto-discovered                  |
-| USB camera         | ffmpeg (same as webcam)      | Auto-discovered                  |
-| RTSP camera        | ffmpeg -rtsp_transport tcp     | User specifies via --camera flag    |
-| Built-in microphone | ffmpeg avfoundation/pulse/alsa | Auto-discovered                  |
-| Speaker (TTS)      | espeak / macOS `say` subprocess | Phase 2                          |
-| Smart home / IoT   | Plugin system (Phase 3)       | Extensible via plugins            |
-
-## Features
-
-- **Vision**: camera capture + VLM analysis via Trio API
-- **Hearing**: microphone capture + speech-to-text via Whisper API (Phase 2)
-- **Voice**: text-to-speech playback via espeak / macOS `say` (Phase 2)
-- **Any camera**: RTSP, USB, webcam, phone (WebRTC, Phase 3)
-- **Any microphone**: system mic, USB, network
-- **Cross-platform**: macOS, Linux, Windows, Raspberry Pi
-- **Single binary**: ~12MB, zero runtime dependencies
-- **Plugin system**: add new devices in any language (Python, Go, shell script)
+---
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  TrioClaw (Go binary on your machine)         │
-│                                                     │
-│  Camera      ──→ ffmpeg ──→ Trio API (VLM) ──┐  │
-│  Mic         ──→ ffmpeg ──→ Whisper API (STT) ───┼──→ Gateway ──→ AI Agent
-│  Speaker     ←── espeak / say ←── TTS text  ←──┘  │
-│                                                     │
-│              ┌─────────────────────────────────────┐      │
-│              │ All VLM/STT happens in cloud   │      │
-└─────────────┴─────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                                                            │
+│   TrioClaw (single Go binary, ~12MB)                       │
+│                                                            │
+│   👁  Camera  ──→ ffmpeg ──→ Trio API (VLM)    ──┐        │
+│   👂  Mic     ──→ ffmpeg ──→ Whisper API (STT) ──┼──→ OpenClaw
+│   🗣  Speaker ←── espeak ←── agent text        ←─┤   Gateway
+│   🤚  Device  ←── plugin ←── agent action      ←─┘        │
+│                                                            │
+│   Cloud: VLM + STT          Local: capture + playback      │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
 ```
 
-### Architecture Principles
+- **Zero CGO** — all device access through `ffmpeg` subprocess
+- **Cross-platform** — macOS, Linux, Windows, Raspberry Pi
+- **Single binary** — `go build` and ship, no runtime deps
+- **Thin** — no local AI, no heavy frameworks, ~2K lines of Go
 
-- **Capture**: all device access through `ffmpeg` subprocess — zero CGO, works everywhere
-- **Understand**: frames/audio → [Trio API](https://trio.machinefi.com) (VLM), [Whisper API](https://platform.openai.com) (STT) — all cloud processing
-- **Speak**: text from agent → `espeak` (Linux) or `say` (macOS) subprocess
-- **Connect**: WebSocket to OpenClaw Gateway (protocol v3)
+---
 
-## Directory Structure
+## Supported Devices
+
+| Device | How | Platforms |
+|--------|-----|-----------|
+| Built-in webcam | `ffmpeg -f avfoundation` / `v4l2` / `dshow` | macOS, Linux, Windows |
+| USB camera | Same as webcam (auto-discovered) | All |
+| RTSP / IP camera | `ffmpeg -rtsp_transport tcp -i rtsp://...` | All |
+| Built-in mic | `ffmpeg -f avfoundation` / `pulse` / `alsa` | macOS, Linux |
+| Speaker (TTS) | `espeak-ng` / macOS `say` | macOS, Linux |
+| Smart home | Plugin system (any language) | All |
+
+---
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `trioclaw pair --gateway ws://host:18789` | Pair with an OpenClaw Gateway (one-time) |
+| `trioclaw run [--camera rtsp://...]` | Start as an OpenClaw node (main mode) |
+| `trioclaw snap [--analyze "question"]` | Capture a frame, optionally analyze with VLM |
+| `trioclaw doctor` | Check ffmpeg, devices, API connectivity |
+| `trioclaw version` | Show version info |
+
+## OpenClaw Commands
+
+When connected to a Gateway, TrioClaw responds to these invoke commands:
+
+| Command | Sense | Description |
+|---------|-------|-------------|
+| `camera.snap` | Eyes | Capture a JPEG frame |
+| `camera.list` | Eyes | List available cameras |
+| `camera.clip` | Eyes | Record a short video clip |
+| `vision.analyze` | Eyes | Capture + VLM analysis ("what do you see?") |
+| `tts.speak` | Mouth | Speak text through local speaker |
+| `mic.listen` | Ears | Record and transcribe audio |
+| `device.control` | Hands | Send command to a smart device |
+
+---
+
+## Project Structure
 
 ```
 TrioClaw/
-├── cmd/trioclaw/          # CLI entry point (pair/run/snap/doctor)
+├── cmd/trioclaw/             # CLI (cobra): pair, run, snap, doctor
 ├── internal/
-│   ├── state/            # State persistence (~/.trioclaw/state.json)
-│   ├── gateway/
-│   │   ├── protocol.go   # WebSocket protocol types
-│   │   ├── client.go     # WebSocket connection management
-│   │   └── handler.go    # Command dispatcher
 │   ├── capture/
-│   │   ├── ffmpeg.go     # Camera capture via ffmpeg subprocess
-│   │   └── mic.go         # Microphone capture via ffmpeg
-│   └── vision/
-│       └── trio.go        # Trio API client for VLM analysis
-├── e2e/                  # End-to-end tests
-├── DESIGN.md             # Detailed design document
-├── go.mod, go.sum       # Go module dependencies
-└── Makefile              # Build targets
+│   │   ├── ffmpeg.go         # Camera capture via ffmpeg subprocess
+│   │   └── mic.go            # Microphone capture via ffmpeg
+│   ├── gateway/
+│   │   ├── protocol.go       # OpenClaw WebSocket protocol v3
+│   │   ├── client.go         # WebSocket client + reconnect
+│   │   └── handler.go        # Invoke command dispatcher
+│   ├── vision/
+│   │   └── trio.go           # Trio API client (POST /check-once)
+│   └── state/
+│       └── state.go          # Persistent state (~/.trioclaw/state.json)
+├── e2e/                      # End-to-end tests
+├── DESIGN.md                 # Architecture & design decisions
+├── SKILL.md                  # OpenClaw Skill Hub definition
+├── go.mod
+└── Makefile
 ```
+
+---
 
 ## Development
 
 ```bash
-# Install dependencies
-go mod tidy
-
-# Run tests
-go test ./...
-
-# Build for current platform
+# Build
 go build -o trioclaw ./cmd/trioclaw
 
-# Cross-compile
-GOOS=linux GOARCH=arm64 go build -o trioclaw-linux-arm64 ./cmd/trioclaw
-GOOS=darwin GOARCH=arm64 go build -o trioclaw-darwin-arm64 ./cmd/trioclaw
-GOOS=windows GOARCH=amd64 go build -o trioclaw-windows-amd64.exe ./cmd/trioclaw
+# Test
+go test ./...
 
-# Run tests with coverage
-go test ./... -cover
+# Cross-compile
+make cross
+# → bin/trioclaw-darwin-arm64
+# → bin/trioclaw-linux-amd64
+# → bin/trioclaw-linux-arm64
+# → bin/trioclaw-windows-amd64.exe
 ```
+
+---
+
+## Roadmap
+
+| Phase | What | Senses |
+|-------|------|--------|
+| **MVP** | Camera capture (webcam + USB + RTSP), mic discovery, Gateway integration, `camera.snap`, `camera.list`, `vision.analyze`, standalone CLI | Eyes |
+| **Phase 2** | STT via Whisper, TTS via espeak/`say`, `vision.watch` with motion detection, proactive events | + Ears + Mouth |
+| **Phase 3** | Plugin system, smart device control via plugins (Tuya, Zigbee, HomeKit, GPIO) | + Hands |
+| **Phase 4** | GitHub releases, `curl \| sh` installer, Docker image, OpenClaw Skill Hub listing | Release |
+
+See [DESIGN.md](DESIGN.md) for detailed architecture, protocol spec, and implementation plan.
+
+---
+
+## Related Projects
+
+| Project | Description |
+|---------|-------------|
+| [OpenClaw](https://github.com/openclaw/openclaw) | Personal AI assistant — the Gateway that TrioClaw connects to |
+| [ClawGo](https://github.com/openclaw/clawgo) | Go node for voice (ears + mouth) — TrioClaw's predecessor |
+| [MimiClaw](https://github.com/memovai/mimiclaw) | $5 chip AI assistant — standalone OpenClaw node |
+| [Trio API](https://trio.machinefi.com) | Vision Language Model API that powers TrioClaw's eyes |
+
+---
 
 ## License
 
-MIT License - see LICENSE file for details
+[MIT](LICENSE)
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Built with [Trio](https://trio.machinefi.com) by [MachineFi](https://github.com/machinefi).

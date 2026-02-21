@@ -385,12 +385,10 @@ func (c *Client) readLoop(ctx context.Context, handler *Handler) error {
 				return err
 			}
 
-			// Reset read deadline on successful read
-			c.connMu.Lock()
+			// Reset read deadline on successful read (readFrame already has lock protection)
 			if c.conn != nil {
 				c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 			}
-			c.connMu.Unlock()
 
 			// Handle frame by type
 			frameType, _ := frame["type"].(string)
@@ -439,11 +437,13 @@ func (c *Client) handleEvent(ctx context.Context, frame map[string]interface{}, 
 			return
 		}
 
-		// Dispatch to handler and send result
-		result := handler.HandleInvoke(ctx, req)
-		if err := c.SendInvokeResult(result); err != nil {
-			fmt.Printf("Failed to send invoke result: %v\n", err)
-		}
+		// Dispatch to handler asynchronously to avoid blocking WebSocket read loop
+		go func() {
+			result := handler.HandleInvoke(ctx, req)
+			if err := c.SendInvokeResult(result); err != nil {
+				fmt.Printf("Failed to send invoke result: %v\n", err)
+			}
+		}()
 
 	case "device.pair.resolved":
 		// Handle pairing result

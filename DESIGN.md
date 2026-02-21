@@ -17,9 +17,20 @@
 
 ## 1. High-Level Goals
 
+TrioClaw gives AI agents four physical senses:
+
+| Sense | Capability | How |
+|-------|-----------|-----|
+| **Eyes** | See the real world | Camera → ffmpeg → Trio API (VLM) |
+| **Ears** | Hear speech and sounds | Mic → ffmpeg → Whisper API (STT) |
+| **Mouth** | Speak to the user | Agent text → espeak / `say` (TTS) |
+| **Hands** | Control physical devices | Agent command → plugin → smart device |
+
+Design principles:
+
 1. **Cross-platform, low friction** — Single binary runs on macOS, Windows, Linux, Raspberry Pi. No runtime, no pip, no npm. `curl | sh` and go.
 
-2. **Easy device onboarding** — Users can quickly connect microphone, camera, and future smart home devices. Long-term stable operation (always-on daemon).
+2. **Easy device onboarding** — Users can quickly connect cameras, microphones, and smart devices. Long-term stable operation (always-on daemon).
 
 3. **OpenClaw integration** — Low-friction connection to OpenClaw Gateway. Enables wow moments ("AI saw my gardener arrive") and IFTTT-like automation. Local machine is thin — all AI processing via Trio API.
 
@@ -56,10 +67,10 @@
 Go has no native camera/mic access. We delegate to external tools:
 
 ```
-Camera → ffmpeg subprocess (avfoundation/dshow/v4l2)
-Mic    → ffmpeg / arecord / sox subprocess
-GPIO   → /sys/class/gpio file I/O (no CGO)
-IoT    → MQTT client (pure Go) or plugin subprocess
+Eyes  (Camera)  → ffmpeg subprocess (avfoundation/dshow/v4l2)
+Ears  (Mic)     → ffmpeg / arecord / sox subprocess
+Mouth (Speaker) → espeak-ng / macOS say subprocess
+Hands (Devices) → plugin subprocess (MQTT, HTTP, GPIO)
 ```
 
 This is exactly what go2rtc and ClawGo do. It works.
@@ -103,10 +114,11 @@ Users need ffmpeg for camera/mic features. Mitigation:
 │  ┌──────┴─────────────────────────────────────────┴─────────┐│
 │  │                    Command Router                         ││
 │  │                                                           ││
-│  │  camera.snap   → Plugin Manager → camera plugin → frame   ││
-│  │  vision.analyze → frame + Trio API → analysis result      ││
-│  │  vision.watch  → background job (motion + periodic VLM)   ││
-│  │  mic.listen    → Plugin Manager → mic plugin → audio      ││
+│  │  camera.snap    → Plugin Manager → camera plugin → frame   ││
+│  │  vision.analyze → frame + Trio API → analysis result       ││
+│  │  vision.watch   → background job (motion + periodic VLM)   ││
+│  │  mic.listen     → Plugin Manager → mic plugin → audio      ││
+│  │  device.control → Plugin Manager → device plugin → action  ││
 │  └───────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────┘
          │                    │
@@ -331,12 +343,25 @@ TrioClaw implements the current OpenClaw Gateway WebSocket protocol (not the dep
 Gateway sends `node.invoke.request` → TrioClaw dispatches to handler:
 
 ```
-camera.snap     → plugin: capture frame → return base64 JPEG
-camera.list     → plugin: enumerate devices → return device list
-camera.clip     → plugin: record clip → return base64 MP4
-vision.analyze  → capture frame → POST to Trio API /check-once → return analysis
-vision.watch    → start background job → return jobId → emit events on trigger
-vision.status   → return active cameras + jobs
+Eyes:
+  camera.snap     → ffmpeg: capture frame → return base64 JPEG
+  camera.list     → ffmpeg: enumerate devices → return device list
+  camera.clip     → ffmpeg: record clip → return base64 MP4
+  vision.analyze  → capture frame → POST to Trio API /check-once → return analysis
+  vision.watch    → start background job → return jobId → emit events on trigger
+  vision.status   → return active cameras + jobs
+
+Ears:
+  mic.listen      → ffmpeg: capture audio → Whisper API → return transcription
+  mic.detect      → ffmpeg: capture audio → detect specific sound → return result
+
+Mouth:
+  tts.speak       → espeak / say subprocess → play audio through speaker
+
+Hands:
+  device.list     → plugin: enumerate controllable devices → return device list
+  device.control  → plugin: send command to device → return result
+  device.status   → plugin: query device state → return status
 ```
 
 #### Proactive Events
@@ -714,26 +739,46 @@ Terminal 2 (OpenClaw chat):
 
 ## 10. Post-MVP Phases
 
-### Phase 2: Intelligence + Monitoring (2 weeks)
+### Phase 2: Ears + Mouth + Intelligence (2 weeks)
 
 ```
+  Ears (STT):
+  ☐ mic.listen — continuous capture → Whisper API → transcription
+  ☐ mic.detect — detect specific sounds (doorbell, alarm, glass break)
+  ☐ voice.transcript events pushed to Gateway
+
+  Mouth (TTS):
+  ☐ tts.speak — agent text → espeak-ng (Linux) / say (macOS) subprocess
+  ☐ Volume control, voice selection
+
+  Eyes (enhanced):
   ☐ vision.watch — background monitoring with condition + interval
   ☐ Motion detection (frame diff in pure Go, or ffmpeg scene detect)
   ☐ Proactive events (agent.request when vision trigger fires)
   ☐ vision.status — list active watches
   ☐ camera.clip invoke handler
-  ☐ Mic: continuous capture → send to Whisper API → transcription events
+
+  Standalone:
   ☐ trioclaw watch (standalone mode, no Gateway, webhook output)
 ```
 
-### Phase 3: Plugin System (1 week)
+### Phase 3: Hands + Plugin System (2 weeks)
 
 ```
+  Hands (device control):
+  ☐ device.list — enumerate controllable smart devices
+  ☐ device.control — send commands (on/off, brightness, lock/unlock, etc.)
+  ☐ device.status — query device state
+
+  Plugin system:
   ☐ Plugin manager (scan dir, spawn subprocess, JSON Lines protocol)
   ☐ plugin.yaml manifest spec
   ☐ Plugin lifecycle (start, health, restart, shutdown)
-  ☐ Example plugins: tuya-sensor (Python), gpio-raspi (bash)
-  ☐ trioclaw plugin list
+  ☐ Example plugins:
+    - tuya-light (Python) — Tuya smart bulb control
+    - gpio-raspi (bash) — Raspberry Pi GPIO
+    - homekit-bridge (Go) — HomeKit accessories
+  ☐ trioclaw plugin list / install
 ```
 
 ### Phase 4: Release (1 week)
@@ -742,7 +787,7 @@ Terminal 2 (OpenClaw chat):
   ☐ Cross-compile (linux/amd64, linux/arm64, darwin/arm64, windows/amd64)
   ☐ GitHub releases + install.sh
   ☐ Docker image
-  ☐ SKILL.md for OpenClaw registry
+  ☐ SKILL.md for OpenClaw Skill Hub
   ☐ Demo GIFs in README
 ```
 
@@ -750,13 +795,16 @@ Terminal 2 (OpenClaw chat):
 
 ## Appendix A: Comparison with Existing Nodes
 
-| | ClawGo | iOS Node | Windows Hub | TrioClaw |
+| | ClawGo | iOS Node | Windows Hub | **TrioClaw** |
 |---|---|---|---|---|
 | Language | Go | Swift | C# | **Go** |
-| Sense | Hearing | Vision + Location | Screen + Shell | **Vision + Hearing + IoT** |
-| Device access | subprocess (espeak) | native APIs | native APIs | **subprocess (ffmpeg) + plugins** |
-| Local intelligence | None | None | None | **Motion detection + Trio API** |
-| Protocol | TCP Bridge (deprecated) | WebSocket | WebSocket | **WebSocket** |
+| Eyes (Vision) | — | Camera + CoreML | — | **Camera + Trio API (VLM)** |
+| Ears (STT) | Whisper | — | — | **Whisper** |
+| Mouth (TTS) | espeak | — | — | **espeak / say** |
+| Hands (Control) | — | — | Shell commands | **Plugin system (IoT)** |
+| Device access | subprocess | native APIs | native APIs | **subprocess (ffmpeg) + plugins** |
+| Local intelligence | None | On-device ML | None | **Motion detection + cloud VLM** |
+| Protocol | TCP Bridge (old) | WebSocket | WebSocket | **WebSocket** |
 | Standalone? | No | No | No | **Yes** |
 | Plugin system | No | No | No | **Yes** |
 | Target hardware | RPi | iPhone | Windows PC | **Anything** |

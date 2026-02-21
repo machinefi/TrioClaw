@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff6b35"/>
+      <stop offset="100%" style="stop-color:#e84118"/>
+    </linearGradient>
+    <linearGradient id="claw" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#fff"/>
+      <stop offset="100%" style="stop-color:#f0e6d3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="92" fill="url(#bg)"/>
+
+  <!-- Lobster claw shape (simplified, stylized) -->
+  <g transform="translate(100,105) scale(0.85)">
+    <!-- Left pincer -->
+    <path d="M-8,-45 C-35,-55 -55,-35 -50,-10 C-47,5 -35,12 -20,10 L-8,0 Z"
+          fill="url(#claw)" opacity="0.95"/>
+    <!-- Right pincer -->
+    <path d="M8,-45 C35,-55 55,-35 50,-10 C47,5 35,12 20,10 L8,0 Z"
+          fill="url(#claw)" opacity="0.95"/>
+    <!-- Body/base -->
+    <ellipse cx="0" cy="10" rx="18" ry="22" fill="url(#claw)" opacity="0.95"/>
+  </g>
+
+  <!-- Eye (left) - represents vision -->
+  <circle cx="82" cy="82" r="7" fill="#1a1a2e"/>
+  <circle cx="84" cy="80" r="2.5" fill="#fff"/>
+
+  <!-- Eye (right) - represents vision -->
+  <circle cx="118" cy="82" r="7" fill="#1a1a2e"/>
+  <circle cx="120" cy="80" r="2.5" fill="#fff"/>
+
+  <!-- Signal waves (represents sensing/hearing) -->
+  <path d="M145,75 C155,65 155,55 145,45" stroke="#fff" stroke-width="2.5" fill="none" opacity="0.6" stroke-linecap="round"/>
+  <path d="M152,80 C165,67 165,48 152,35" stroke="#fff" stroke-width="2.5" fill="none" opacity="0.4" stroke-linecap="round"/>
+
+  <!-- Small dots representing four senses -->
+  <circle cx="85" cy="140" r="4" fill="#fff" opacity="0.8"/>  <!-- eye -->
+  <circle cx="100" cy="143" r="4" fill="#fff" opacity="0.6"/> <!-- ear -->
+  <circle cx="115" cy="140" r="4" fill="#fff" opacity="0.4"/> <!-- mouth -->
+</svg>

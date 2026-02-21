@@ -493,8 +493,10 @@ func RecordClip(source string, durationMs int) (*Clip, error) {
 }
 
 // isRTSP returns true if the source string looks like an RTSP URL.
+// Case-insensitive check for RTSP URLs (RFC 2326 defines RTSP in lowercase).
 func isRTSP(source string) bool {
-	return strings.HasPrefix(source, "rtsp://") || strings.HasPrefix(source, "rtsps://")
+	lower := strings.ToLower(source)
+	return strings.HasPrefix(lower, "rtsp://") || strings.HasPrefix(lower, "rtsps://")
 }
 
 // buildWebcamArgs returns ffmpeg args for capturing from a local webcam.

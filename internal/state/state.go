@@ -200,7 +200,7 @@ func generateRandomID(length int) string {
 
 // IsPaired returns true if state has a valid gateway token.
 func (s *State) IsPaired() bool {
-	return s.Token != ""
+	return strings.TrimSpace(s.Token) != ""
 }
 
 // LoadStateFile loads state from a specific file path (for testing).
