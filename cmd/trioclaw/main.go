@@ -1,17 +1,21 @@
 // Package main is the CLI entry point for TrioClaw.
 //
 // Commands:
-//   trioclaw pair   --gateway ws://host:18789   Pair with OpenClaw Gateway
-//   trioclaw run    [--camera rtsp://...]        Start as OpenClaw node
-//   trioclaw snap   [--camera ...] [--analyze q] One-shot capture + optional VLM
-//   trioclaw doctor                              Check dependencies & devices
+//   trioclaw pair    --gateway ws://host:18789   Pair with OpenClaw Gateway
+//   trioclaw run     [--camera rtsp://...]        Start as OpenClaw node
+//   trioclaw snap    [--camera ...] [--analyze q] One-shot capture + optional VLM
+//   trioclaw doctor                               Check dependencies & devices
+//   trioclaw update                               Self-update to latest release
 package main
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"syscall"
@@ -19,6 +23,9 @@ import (
 
 	"github.com/machinefi/trioclaw/internal/capture"
 	"github.com/machinefi/trioclaw/internal/gateway"
+	pluginpkg "github.com/machinefi/trioclaw/internal/plugin"
+	"github.com/machinefi/trioclaw/internal/plugin/execplugin"
+	ha "github.com/machinefi/trioclaw/internal/plugin/homeassistant"
 	"github.com/machinefi/trioclaw/internal/state"
 	"github.com/machinefi/trioclaw/internal/vision"
 	"github.com/spf13/cobra"
@@ -132,6 +139,10 @@ func runPair(ctx context.Context) error {
 // =============================================================================
 
 var runCameras []string // additional camera sources (rtsp:// or device paths)
+var runTrioAPI string   // Trio API URL
+var runHAURL string     // Home Assistant URL
+var runHAToken string   // Home Assistant long-lived access token
+var runPluginDir string // custom plugin scripts directory
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -168,10 +179,42 @@ func runRun(ctx context.Context) error {
 	}
 
 	// Create Trio API client
-	trioClient := vision.NewTrioClient("")
+	trioClient := vision.NewTrioClient(runTrioAPI)
+	if runTrioAPI != "" {
+		fmt.Printf("Trio API: %s\n", runTrioAPI)
+	} else {
+		fmt.Printf("Trio API: %s (default)\n", vision.DefaultTrioAPIURL)
+	}
 
 	// Create handler
 	handler := gateway.NewHandler(devices, trioClient, runCameras)
+
+	// Setup plugins (Hands)
+	registry := pluginpkg.NewRegistry()
+
+	// Home Assistant plugin
+	if runHAURL != "" && runHAToken != "" {
+		haPlugin := ha.New(runHAURL, runHAToken)
+		if err := registry.Register(haPlugin); err != nil {
+			return fmt.Errorf("failed to register HA plugin: %w", err)
+		}
+		fmt.Printf("  + Home Assistant: %s\n", runHAURL)
+	}
+
+	// Exec plugin (user scripts)
+	execPlugin, err := execplugin.New(runPluginDir)
+	if err != nil {
+		fmt.Printf("Warning: exec plugin init failed: %v\n", err)
+	} else {
+		if err := registry.Register(execPlugin); err != nil {
+			fmt.Printf("Warning: failed to register exec plugin: %v\n", err)
+		}
+		if execPlugin.ScriptCount() > 0 {
+			fmt.Printf("  + Exec plugins: %d script(s)\n", execPlugin.ScriptCount())
+		}
+	}
+
+	handler.SetPlugins(registry)
 
 	// Create client
 	client := gateway.NewClient(st.GatewayURL, st.Token)
@@ -413,6 +456,125 @@ var versionCmd = &cobra.Command{
 }
 
 // =============================================================================
+// trioclaw update
+//
+// Self-update: checks GitHub for the latest release and replaces the current
+// binary. Uses the same install.sh logic but as a native Go command.
+// =============================================================================
+
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update TrioClaw to the latest version",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runUpdate()
+	},
+}
+
+func runUpdate() error {
+	fmt.Printf("Current version: %s\n", version)
+
+	// Fetch latest release from GitHub API
+	fmt.Println("Checking for updates...")
+
+	resp, err := http.Get("https://api.github.com/repos/machinefi/TrioClaw/releases/latest")
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("GitHub API returned %d — no releases published yet?", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return fmt.Errorf("failed to parse release info: %w", err)
+	}
+
+	latest := release.TagName
+	// Strip leading "v" for comparison
+	latestClean := latest
+	if len(latestClean) > 0 && latestClean[0] == 'v' {
+		latestClean = latestClean[1:]
+	}
+
+	if latestClean == version {
+		fmt.Printf("Already up to date (%s)\n", version)
+		return nil
+	}
+
+	fmt.Printf("New version available: %s → %s\n", version, latest)
+
+	// Build download URL
+	platform := fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH)
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	filename := fmt.Sprintf("trioclaw-%s%s", platform, suffix)
+	downloadURL := fmt.Sprintf("https://github.com/machinefi/TrioClaw/releases/download/%s/%s", latest, filename)
+
+	fmt.Printf("Downloading %s...\n", downloadURL)
+
+	// Download to temp file
+	dlResp, err := http.Get(downloadURL)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer dlResp.Body.Close()
+
+	if dlResp.StatusCode != 200 {
+		return fmt.Errorf("download failed (HTTP %d). Asset '%s' may not exist for this release", dlResp.StatusCode, filename)
+	}
+
+	tmpFile, err := os.CreateTemp("", "trioclaw-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := io.Copy(tmpFile, dlResp.Body); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("download failed: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+
+	// Find current binary path
+	currentBin, err := os.Executable()
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("could not find current binary path: %w", err)
+	}
+
+	// Replace current binary
+	// Try direct rename first (same filesystem), fall back to sudo
+	if err := os.Rename(tmpPath, currentBin); err != nil {
+		// Likely a permission issue — try sudo mv
+		fmt.Println("Requires elevated permissions...")
+		sudoCmd := exec.Command("sudo", "mv", tmpPath, currentBin)
+		sudoCmd.Stdin = os.Stdin
+		sudoCmd.Stdout = os.Stdout
+		sudoCmd.Stderr = os.Stderr
+		if err := sudoCmd.Run(); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to install update: %w", err)
+		}
+	}
+
+	fmt.Printf("\nUpdated to %s\n", latest)
+	return nil
+}
+
+// =============================================================================
 // Init: wire up all commands and flags
 // =============================================================================
 
@@ -424,6 +586,10 @@ func init() {
 
 	// run command flags
 	runCmd.Flags().StringArrayVar(&runCameras, "camera", nil, "Additional camera source (rtsp:// URL or device path)")
+	runCmd.Flags().StringVar(&runTrioAPI, "trio-api", "", "Trio API URL (default: https://trio.machinefi.com)")
+	runCmd.Flags().StringVar(&runHAURL, "ha-url", "", "Home Assistant URL (e.g. http://homeassistant.local:8123)")
+	runCmd.Flags().StringVar(&runHAToken, "ha-token", "", "Home Assistant long-lived access token")
+	runCmd.Flags().StringVar(&runPluginDir, "plugin-dir", "", "Directory for exec plugin scripts (default: ~/.trioclaw/plugins/)")
 
 	// snap command flags
 	snapCmd.Flags().StringVar(&snapCamera, "camera", "", "Camera source (default: built-in webcam)")
@@ -435,17 +601,19 @@ func init() {
 	doctorCmd.Flags().StringVar(&doctorTrioAPI, "trio-api", "", "Trio API URL to check (default: https://trio.machinefi.com)")
 
 	// Add commands
-	rootCmd.AddCommand(pairCmd, runCmd, snapCmd, doctorCmd, versionCmd)
+	rootCmd.AddCommand(pairCmd, runCmd, snapCmd, doctorCmd, versionCmd, updateCmd)
 }
 
 // nodeCapabilities returns caps and commands to advertise during pairing.
 func nodeCapabilities() (caps []string, commands []string) {
-	caps = []string{"camera"}
+	caps = []string{"camera", "device"}
 	commands = []string{
 		"camera.snap",
 		"camera.list",
 		"camera.clip",
 		"vision.analyze",
+		"device.list",
+		"device.control",
 	}
 	return
 }
@@ -455,13 +623,4 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-// Helper function for encoding/decoding (used for internal operations)
-func base64Encode(data []byte) string {
-	return base64.StdEncoding.EncodeToString(data)
-}
-
-func base64Decode(s string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(s)
 }
