@@ -69,7 +69,7 @@ TrioClaw is a single Go binary. One side connects to local hardware (cameras, mi
 
 ```bash
 # Install
-curl -sSL https://get.trioclaw.com | sh
+curl -sSL https://raw.githubusercontent.com/machinefi/TrioClaw/main/install.sh | sh
 
 # Verify everything works
 trioclaw doctor
@@ -164,6 +164,7 @@ trioclaw watch rtsp://192.168.1.50/stream1 \
 | `trioclaw run [--camera rtsp://...]` | Start as an OpenClaw node (main mode) |
 | `trioclaw snap [--analyze "question"]` | Capture a frame, optionally analyze with VLM |
 | `trioclaw doctor` | Check ffmpeg, devices, API connectivity |
+| `trioclaw update` | Self-update to the latest release |
 | `trioclaw version` | Show version info |
 
 ## OpenClaw Commands

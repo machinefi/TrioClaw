@@ -10,6 +10,9 @@
     </linearGradient>
   </defs>
 
+  <!-- Background -->
+  <rect width="800" height="200" rx="12" fill="#0d1117"/>
+
   <!-- Logo circle -->
   <circle cx="100" cy="100" r="75" fill="url(#logobg)"/>
 
