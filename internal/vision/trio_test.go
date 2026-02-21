@@ -64,21 +64,16 @@ func TestAnalyzeResult_JSON(t *testing.T) {
 }
 
 func TestHealthCheck_Success(t *testing.T) {
-	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != healthCheckPath {
 			t.Errorf("Path = %s, want %s", r.URL.Path, healthCheckPath)
 		}
-
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	// Create client with mock server URL
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient(server.URL)
 
-	// Test health check
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -89,14 +84,12 @@ func TestHealthCheck_Success(t *testing.T) {
 }
 
 func TestHealthCheck_Failure(t *testing.T) {
-	// Create mock server that returns error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient(server.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -108,34 +101,36 @@ func TestHealthCheck_Failure(t *testing.T) {
 }
 
 func TestAnalyze_Success(t *testing.T) {
-	// Create mock server
-	jpegData := make([]byte, 1024) // Simulated JPEG data
+	jpegData := make([]byte, 1024)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("Method = %s, want %s", r.Method, http.MethodPost)
 		}
 
-		if r.URL.Path != checkOncePath {
-			t.Errorf("Path = %s, want %s", r.URL.Path, checkOncePath)
+		if r.URL.Path != analyzeFramePath {
+			t.Errorf("Path = %s, want %s", r.URL.Path, analyzeFramePath)
 		}
 
 		// Parse request
-		var req checkOnceRequest
+		var req analyzeFrameRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("Decode error = %v", err)
 		}
 
-		// Verify request contains base64 image
-		if req.StreamURL == "" {
-			t.Error("StreamURL is empty")
+		if req.FrameB64 == "" {
+			t.Error("FrameB64 is empty")
+		}
+		if req.Question == "" {
+			t.Error("Question is empty")
 		}
 
 		// Return mock response
-		resp := checkOnceResponse{
-			Triggered:   true,
-			Explanation: "A person is standing at the door",
-			Confidence:  0.92,
+		triggered := true
+		resp := analyzeFrameResponse{
+			Answer:    "A person is standing at the door",
+			Triggered: &triggered,
+			LatencyMs: 150,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -144,15 +139,14 @@ func TestAnalyze_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient(server.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	result, err := client.Analyze(ctx, jpegData, "Is there a person?")
 	if err != nil {
-		t.Errorf("Analyze() error = %v, want nil", err)
+		t.Fatalf("Analyze() error = %v, want nil", err)
 	}
 
 	if result.Triggered != true {
@@ -162,25 +156,10 @@ func TestAnalyze_Success(t *testing.T) {
 	if result.Explanation == "" {
 		t.Error("Explanation is empty")
 	}
-
-	if result.Confidence <= 0 || result.Confidence > 1 {
-		t.Errorf("Confidence = %v, want in [0, 1]", result.Confidence)
-	}
 }
 
 func TestAnalyze_EmptyJPEG(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(checkOnceResponse{
-			Triggered:   false,
-			Explanation: "No person detected",
-			Confidence:  0.1,
-		})
-	}))
-	defer server.Close()
-
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient("http://localhost:9999")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -192,18 +171,7 @@ func TestAnalyze_EmptyJPEG(t *testing.T) {
 }
 
 func TestAnalyze_EmptyQuestion(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(checkOnceResponse{
-			Triggered:   false,
-			Explanation: "No person detected",
-			Confidence:  0.1,
-		})
-	}))
-	defer server.Close()
-
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient("http://localhost:9999")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -215,38 +183,13 @@ func TestAnalyze_EmptyQuestion(t *testing.T) {
 	}
 }
 
-func TestAnalyze_APIError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return error response from API
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(checkOnceResponse{
-			Error: "Invalid image format",
-		})
-	}))
-	defer server.Close()
-
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	jpegData := make([]byte, 1024)
-	_, err := client.Analyze(ctx, jpegData, "What do you see?")
-	if err == nil {
-		t.Error("Analyze() error = nil, want error for API error")
-	}
-}
-
 func TestAnalyze_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	client := NewTrioClient("")
-	client.SetHTTPClient(server.Client())
+	client := NewTrioClient(server.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -255,6 +198,36 @@ func TestAnalyze_HTTPError(t *testing.T) {
 	_, err := client.Analyze(ctx, jpegData, "What do you see?")
 	if err == nil {
 		t.Error("Analyze() error = nil, want error for HTTP 500")
+	}
+}
+
+func TestAnalyze_NullTriggered(t *testing.T) {
+	jpegData := make([]byte, 1024)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return response with null triggered (open-ended question)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"answer":"The scene shows a park with trees","triggered":null,"latency_ms":200}`))
+	}))
+	defer server.Close()
+
+	client := NewTrioClient(server.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.Analyze(ctx, jpegData, "What do you see?")
+	if err != nil {
+		t.Fatalf("Analyze() error = %v, want nil", err)
+	}
+
+	if result.Triggered != false {
+		t.Errorf("Triggered = %v, want false for null triggered", result.Triggered)
+	}
+
+	if result.Explanation != "The scene shows a park with trees" {
+		t.Errorf("Explanation = %q, want description", result.Explanation)
 	}
 }
 
