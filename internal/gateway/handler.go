@@ -1,19 +1,16 @@
 // handler.go dispatches invoke commands from the gateway to the appropriate
-// capture/vision/plugin functions and sends results back.
+// capture/vision functions and sends results back.
 //
 // The Handler is a bridge between:
 //   - Gateway protocol (invoke requests/results)
 //   - Capture layer (ffmpeg camera/mic access)
 //   - Vision layer (Trio API for VLM analysis)
-//   - Plugin layer (device control via Home Assistant, scripts, etc.)
 //
 // Command routing:
 //   "camera.snap"     → capture.CaptureFrame → base64 JPEG → invoke result
 //   "camera.list"     → capture.ListDevices → device list → invoke result
 //   "camera.clip"     → capture.RecordClip → base64 MP4 → invoke result
 //   "vision.analyze"  → capture.CaptureFrame → vision.Analyze → text → invoke result
-//   "device.list"     → plugin.Registry.ListAllDevices → device list → invoke result
-//   "device.control"  → plugin.Registry.Execute → result → invoke result
 package gateway
 
 import (
@@ -23,17 +20,15 @@ import (
 	"fmt"
 
 	"github.com/machinefi/trioclaw/internal/capture"
-	"github.com/machinefi/trioclaw/internal/plugin"
 	"github.com/machinefi/trioclaw/internal/vision"
 )
 
 // Handler processes invoke requests from the gateway.
 type Handler struct {
-	devices      []capture.Device    // available devices
-	trioClient   *vision.TrioClient  // Trio API client for VLM
-	extraCameras []string            // additional camera sources (RTSP URLs, etc.)
-	plugins      *plugin.Registry    // device control plugins
-	nodeID       string              // this node's ID
+	devices     []capture.Device    // available devices
+	trioClient  *vision.TrioClient  // Trio API client for VLM
+	extraCameras []string           // additional camera sources (RTSP URLs, etc.)
+	nodeID      string             // this node's ID
 }
 
 // NewHandler creates a handler with discovered devices and a Trio API client.
@@ -42,13 +37,7 @@ func NewHandler(devices []capture.Device, trioClient *vision.TrioClient, extraCa
 		devices:      devices,
 		trioClient:   trioClient,
 		extraCameras: extraCameras,
-		plugins:      plugin.NewRegistry(),
 	}
-}
-
-// SetPlugins sets the plugin registry for device control.
-func (h *Handler) SetPlugins(registry *plugin.Registry) {
-	h.plugins = registry
 }
 
 // SetNodeID sets the node ID for invoke results.
@@ -71,10 +60,6 @@ func (h *Handler) HandleInvoke(ctx context.Context, req InvokeRequest) InvokeRes
 		return h.handleCameraClip(ctx, req)
 	case "vision.analyze":
 		return h.handleVisionAnalyze(ctx, req)
-	case "device.list":
-		return h.handleDeviceList(ctx, req)
-	case "device.control":
-		return h.handleDeviceControl(ctx, req)
 	default:
 		return InvokeResult{
 			ID:     req.ID,
@@ -382,89 +367,4 @@ func isExtraCameraID(id string) bool {
 	}
 	prefix := id[:7]
 	return prefix == "extra-"
-}
-
-// =============================================================================
-// Device control handlers (Hands)
-// =============================================================================
-
-// handleDeviceList returns all controllable devices across all plugins.
-//
-// No params.
-// Result: { devices: [{id, name, plugin, type, state, actions}] }
-func (h *Handler) handleDeviceList(ctx context.Context, req InvokeRequest) InvokeResult {
-	devices, err := h.plugins.ListAllDevices(ctx)
-	if err != nil {
-		return InvokeResult{
-			ID:     req.ID,
-			NodeID: h.nodeID,
-			OK:     false,
-			Error:  &ErrorPayload{Code: "DEVICE_LIST_FAILED", Message: fmt.Sprintf("failed to list devices: %v", err)},
-		}
-	}
-
-	type deviceListResult struct {
-		Devices []plugin.Device `json:"devices"`
-	}
-	result := deviceListResult{Devices: devices}
-	resultJSON := marshalResult(result)
-
-	return InvokeResult{
-		ID:     req.ID,
-		NodeID: h.nodeID,
-		OK:     true,
-		Result: resultJSON,
-	}
-}
-
-// handleDeviceControl executes an action on a device.
-//
-// Params: DeviceControlParams (deviceId, action, params)
-// Result: DeviceControlResult (success, message, newState)
-func (h *Handler) handleDeviceControl(ctx context.Context, req InvokeRequest) InvokeResult {
-	var params DeviceControlParams
-	if err := DecodePayloadJSON(string(req.Params), &params); err != nil {
-		return InvokeResult{
-			ID:     req.ID,
-			NodeID: h.nodeID,
-			OK:     false,
-			Error:  &ErrorPayload{Code: "INVALID_PARAMS", Message: fmt.Sprintf("failed to parse params: %v", err)},
-		}
-	}
-
-	if params.DeviceID == "" {
-		return InvokeResult{
-			ID:     req.ID,
-			NodeID: h.nodeID,
-			OK:     false,
-			Error:  &ErrorPayload{Code: "INVALID_PARAMS", Message: "deviceId is required"},
-		}
-	}
-	if params.Action == "" {
-		return InvokeResult{
-			ID:     req.ID,
-			NodeID: h.nodeID,
-			OK:     false,
-			Error:  &ErrorPayload{Code: "INVALID_PARAMS", Message: "action is required"},
-		}
-	}
-
-	result, err := h.plugins.Execute(ctx, params.DeviceID, params.Action, params.Params)
-	if err != nil {
-		return InvokeResult{
-			ID:     req.ID,
-			NodeID: h.nodeID,
-			OK:     false,
-			Error:  &ErrorPayload{Code: "DEVICE_CONTROL_FAILED", Message: fmt.Sprintf("failed to control device: %v", err)},
-		}
-	}
-
-	resultJSON := marshalResult(result)
-
-	return InvokeResult{
-		ID:     req.ID,
-		NodeID: h.nodeID,
-		OK:     true,
-		Result: resultJSON,
-	}
 }

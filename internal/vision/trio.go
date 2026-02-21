@@ -5,8 +5,8 @@
 // machine requirements minimal.
 //
 // Trio API endpoints used:
-//   POST /analyze-frame  — base64 JPEG + question → answer + triggered
-//   GET  /healthz        — health check
+//   POST /check-once  — single frame + condition → yes/no + explanation
+//   GET  /healthz     — health check
 package vision
 
 import (
@@ -24,9 +24,9 @@ import (
 const DefaultTrioAPIURL = "https://trio.machinefi.com"
 
 const (
-	defaultTimeout     = 30 * time.Second
-	healthCheckPath    = "/healthz"
-	analyzeFramePath   = "/analyze-frame"
+	defaultTimeout   = 30 * time.Second
+	healthCheckPath  = "/healthz"
+	checkOncePath    = "/check-once"
 )
 
 // TrioClient is an HTTP client for the Trio API.
@@ -57,17 +57,18 @@ type AnalyzeResult struct {
 	Confidence  float64 `json:"confidence"`  // 0.0-1.0
 }
 
-// analyzeFrameRequest is the request body for POST /analyze-frame.
-type analyzeFrameRequest struct {
-	FrameB64 string `json:"frame_b64"` // raw base64-encoded JPEG (no data: URI prefix)
-	Question string `json:"question"`  // question or condition about the image
+// checkOnceRequest is the request body for /check-once.
+type checkOnceRequest struct {
+	StreamURL string `json:"stream_url"` // data:image/jpeg;base64,{encoded}
+	Condition string `json:"condition"`   // the question to ask about the frame
 }
 
-// analyzeFrameResponse is the response from POST /analyze-frame.
-type analyzeFrameResponse struct {
-	Answer    string `json:"answer"`
-	Triggered *bool  `json:"triggered"` // pointer because it can be null
-	LatencyMs int    `json:"latency_ms"`
+// checkOnceResponse is the response from /check-once.
+type checkOnceResponse struct {
+	Triggered   bool    `json:"triggered"`
+	Explanation string  `json:"explanation"`
+	Confidence  float64 `json:"confidence"`
+	Error       string  `json:"error,omitempty"`
 }
 
 // Analyze sends a JPEG frame to the Trio API for VLM analysis.
@@ -78,11 +79,11 @@ type analyzeFrameResponse struct {
 //   - "what do you see?"
 //   - "is it raining?"
 //
-// Calls POST /analyze-frame with:
+// Calls POST /api/v1/check-once with:
 //
 //	{
-//	  "frame_b64": "{base64 encoded JPEG}",
-//	  "question": "{question}"
+//	  "stream_url": "data:image/jpeg;base64,{encoded}",
+//	  "condition": "{question}"
 //	}
 //
 // Returns the VLM's analysis.
@@ -99,9 +100,9 @@ func (c *TrioClient) Analyze(ctx context.Context, jpeg []byte, question string) 
 	encoded := base64.StdEncoding.EncodeToString(jpeg)
 
 	// Build request body
-	reqBody := analyzeFrameRequest{
-		FrameB64: encoded,
-		Question: question,
+	reqBody := checkOnceRequest{
+		StreamURL: "data:image/jpeg;base64," + encoded,
+		Condition: question,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -110,7 +111,7 @@ func (c *TrioClient) Analyze(ctx context.Context, jpeg []byte, question string) 
 	}
 
 	// Create HTTP request
-	url := c.baseURL + analyzeFramePath
+	url := c.baseURL + checkOncePath
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -137,19 +138,20 @@ func (c *TrioClient) Analyze(ctx context.Context, jpeg []byte, question string) 
 	}
 
 	// Parse response
-	var apiResp analyzeFrameResponse
+	var apiResp checkOnceResponse
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	triggered := false
-	if apiResp.Triggered != nil {
-		triggered = *apiResp.Triggered
+	// Check for API-level errors
+	if apiResp.Error != "" {
+		return nil, fmt.Errorf("Trio API error: %s", apiResp.Error)
 	}
 
 	return &AnalyzeResult{
-		Triggered:   triggered,
-		Explanation: apiResp.Answer,
+		Triggered:   apiResp.Triggered,
+		Explanation: apiResp.Explanation,
+		Confidence:  apiResp.Confidence,
 	}, nil
 }
 
