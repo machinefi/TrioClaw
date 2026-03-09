@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/machinefi/trioclaw/internal/config"
+	"github.com/machinefi/trioclaw/internal/dashboard"
 	"github.com/machinefi/trioclaw/internal/store"
 	"github.com/machinefi/trioclaw/internal/triocore"
 )
@@ -50,6 +51,7 @@ func NewServer(cfg *config.Config, s *store.Store, watchMgr *triocore.Manager) *
 }
 
 func (s *Server) routes() {
+	s.mux.Handle("GET /", dashboard.Handler())
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 	s.mux.HandleFunc("GET /api/cameras", s.handleCameras)

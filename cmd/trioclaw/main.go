@@ -426,7 +426,7 @@ func runRun(ctx context.Context) error {
 		if addr == "" {
 			addr = ":8080"
 		}
-		fmt.Printf("api:       http://localhost%s\n", addr)
+		fmt.Printf("dashboard: http://localhost%s\n", addr)
 		if err := apiSrv.ListenAndServe(ctx, addr); err != nil {
 			log.Printf("[api] error: %v", err)
 		}

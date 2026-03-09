@@ -377,8 +377,17 @@ make cross
 |-------|------|--------|
 | **MVP** | Camera capture, Gateway integration, `camera.snap`, `vision.analyze`, standalone CLI | Done |
 | **Phase 2** | YAML config, camera management, continuous monitoring (vision.watch SSE), notifications, HTTP API, clip recording, daily digest, trio-core auto-setup, plugin system | Done |
-| **Phase 3** | STT via Whisper, TTS via espeak/`say`, audio monitoring | Planned |
-| **Phase 4** | GitHub releases, Docker image, OpenClaw Skill Hub listing | Planned |
+| **Phase 3** | Product polish (see below) | In Progress |
+| **Phase 4** | STT via Whisper, TTS via espeak/`say`, audio monitoring | Planned |
+| **Phase 5** | GitHub releases, Docker image, OpenClaw Skill Hub listing | Planned |
+
+### Phase 3: Product Polish
+
+- [ ] **Web Dashboard** — Real-time alert timeline, camera status cards, stats, clip playback. Embedded in the Go binary via `embed.FS`, zero frontend build tools.
+- [ ] **Demo mode** (`trioclaw demo`) — Built-in sample video simulates a camera, produces events/alerts so users can experience the full flow in 30 seconds without any hardware.
+- [ ] **Interactive init** (`trioclaw init`) — Guided wizard that walks through trio-core setup, adding cameras, configuring notifications, and writes `config.yaml`.
+- [ ] **Rich notifications** — Telegram/Slack alerts with attached snapshot image, formatted message (camera name, time, condition, answer).
+- [ ] **README hero image** — Dashboard screenshot or terminal GIF showing the product in action.
 
 ---
 

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TrioClaw Dashboard</title>
+  <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+  <!-- Top Bar -->
+  <div id="topbar"></div>
+
+  <!-- Main Content -->
+  <div class="main">
+
+    <!-- Status Cards -->
+    <section>
+      <div id="status-cards"></div>
+    </section>
+
+    <!-- Camera Grid -->
+    <section>
+      <div class="section-title">Cameras</div>
+      <div id="camera-grid"></div>
+    </section>
+
+    <!-- Alert Feed -->
+    <section>
+      <div class="card">
+        <div class="card-header">
+          <h2>Live Alerts</h2>
+        </div>
+        <div class="card-body" id="alert-feed-content"></div>
+      </div>
+    </section>
+
+    <!-- Event Timeline -->
+    <section>
+      <div class="section-title">Event Timeline</div>
+      <div class="filters">
+        <input type="date" id="filter-date">
+        <select id="filter-camera">
+          <option value="">All cameras</option>
+        </select>
+        <label>
+          <input type="checkbox" id="filter-alerts-only">
+          Alerts only
+        </label>
+      </div>
+      <div id="event-timeline-content"></div>
+    </section>
+
+  </div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/components.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
