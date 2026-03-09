@@ -1,11 +1,12 @@
-// Package main is the CLI entry point for TrioClaw.
+// Package main is the entry point for TrioClaw.
 //
 // Commands:
-//   trioclaw pair    --gateway ws://host:18789   Pair with OpenClaw Gateway
-//   trioclaw run     [--camera rtsp://...]        Start as OpenClaw node
-//   trioclaw snap    [--camera ...] [--analyze q] One-shot capture + optional VLM
-//   trioclaw doctor                               Check dependencies & devices
-//   trioclaw update                               Self-update to latest release
+//   trioclaw pair      --gateway ws://host:18789   Pair with OpenClaw Gateway
+//   trioclaw run       [--config config.yaml]       Start as long-running service
+//   trioclaw snap      [--camera ...] [--analyze q] One-shot capture + optional VLM
+//   trioclaw camera    add|remove|list              Manage cameras
+//   trioclaw doctor                                 Check dependencies & devices
+//   trioclaw update                                 Self-update to latest release
 package main
 
 import (
@@ -13,20 +14,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/machinefi/trioclaw/internal/capture"
+	"github.com/machinefi/trioclaw/internal/config"
 	"github.com/machinefi/trioclaw/internal/gateway"
 	pluginpkg "github.com/machinefi/trioclaw/internal/plugin"
 	"github.com/machinefi/trioclaw/internal/plugin/execplugin"
 	ha "github.com/machinefi/trioclaw/internal/plugin/homeassistant"
 	"github.com/machinefi/trioclaw/internal/state"
+	"github.com/machinefi/trioclaw/internal/store"
+	"github.com/machinefi/trioclaw/internal/triocore"
 	"github.com/machinefi/trioclaw/internal/vision"
 	"github.com/spf13/cobra"
 )
@@ -124,120 +130,226 @@ func runPair(ctx context.Context) error {
 }
 
 // =============================================================================
-// trioclaw run [--camera rtsp://...] [--camera /dev/video0]
+// trioclaw run [--config config.yaml] [--camera rtsp://...]
 //
-// Main operating mode. Connects to Gateway as a node, registers all available
-// devices (cameras + mic), and handles invoke commands from the agent.
+// Long-running service mode. Starts two subsystems in parallel:
+//   1. Watch Manager: connects to trio-core SSE for each configured camera,
+//      stores results/alerts in SQLite, pushes alerts to gateway
+//   2. Gateway Client: connects to OpenClaw gateway (if paired),
+//      handles invoke commands from agents
 //
 // Lifecycle:
-//   1. Load state (must be paired already)
-//   2. Discover local devices via capture.ListDevices()
-//   3. Connect to Gateway, authenticate with saved token
-//   4. Register capabilities: camera.snap, camera.list, vision.analyze
-//   5. Enter main loop: handle invokes, send pings, reconnect on disconnect
-//   6. On SIGINT/SIGTERM: graceful shutdown
+//   1. Load YAML config (~/.trioclaw/config.yaml)
+//   2. Open SQLite event store
+//   3. Start watch manager (SSE per camera → SQLite + gateway alerts)
+//   4. Connect to OpenClaw gateway (if paired)
+//   5. Block until SIGINT/SIGTERM → graceful shutdown
 // =============================================================================
 
-var runCameras []string // additional camera sources (rtsp:// or device paths)
-var runTrioAPI string   // Trio API URL
-var runHAURL string     // Home Assistant URL
-var runHAToken string   // Home Assistant long-lived access token
-var runPluginDir string // custom plugin scripts directory
+var runConfigPath string // config file path
+var runCameras []string  // additional camera sources (rtsp:// or device paths)
+var runTrioAPI string    // Trio API URL (overrides config)
+var runHAURL string      // Home Assistant URL
+var runHAToken string    // Home Assistant long-lived access token
+var runPluginDir string  // custom plugin scripts directory
 
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Start as an OpenClaw node",
+	Short: "Start TrioClaw service (trio-core SSE + OpenClaw gateway)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRun(cmd.Context())
 	},
 }
 
 func runRun(ctx context.Context) error {
-	// Load state (must be paired)
-	st, err := state.MustLoad()
+	// Load config
+	var cfg *config.Config
+	var err error
+	if runConfigPath != "" {
+		cfg, err = config.LoadFrom(runConfigPath)
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("load config: %w", err)
 	}
 
-	fmt.Printf("Node ID: %s\n", st.NodeID)
-	fmt.Printf("Gateway: %s\n", st.GatewayURL)
+	// CLI flag overrides
+	if runTrioAPI != "" {
+		cfg.TrioCore.URL = runTrioAPI
+	}
 
-	// Discover local devices
+	// Add CLI --camera flags as cameras (for backward compat)
+	for i, cam := range runCameras {
+		_ = cfg.AddCamera(config.CameraConfig{
+			ID:     fmt.Sprintf("cli-%d", i),
+			Name:   fmt.Sprintf("CLI Camera %d", i+1),
+			Source: cam,
+			FPS:    1,
+		})
+	}
+
+	fmt.Printf("trio-core: %s\n", cfg.TrioCore.URL)
+	fmt.Printf("cameras:   %d configured\n", len(cfg.Cameras))
+	for _, cam := range cfg.Cameras {
+		fmt.Printf("  - %s: %s (%s)\n", cam.ID, cam.Name, maskCredentials(cam.Source))
+	}
+
+	// Open event store
+	eventStore, err := store.Open(store.DefaultDBPath())
+	if err != nil {
+		return fmt.Errorf("open event store: %w", err)
+	}
+	defer eventStore.Close()
+	fmt.Printf("events db: %s\n", store.DefaultDBPath())
+
+	// Discover local devices (for gateway handler)
 	devices, err := capture.ListDevices()
 	if err != nil {
-		fmt.Printf("Warning: failed to list devices: %v\n", err)
+		fmt.Printf("warning: failed to list devices: %v\n", err)
 	} else {
-		fmt.Printf("Found %d device(s)\n", len(devices))
-		for _, dev := range devices {
-			fmt.Printf("  - %s: %s (%s)\n", dev.ID, dev.Name, dev.Type)
-		}
+		fmt.Printf("devices:   %d found\n", len(devices))
 	}
 
-	// Add extra cameras
-	for _, cam := range runCameras {
-		fmt.Printf("  - extra: %s (RTSP)\n", cam)
-	}
-
-	// Create Trio API client
+	// Create Trio API client (for gateway invoke handler, backward compat)
 	trioClient := vision.NewTrioClient(runTrioAPI)
-	if runTrioAPI != "" {
-		fmt.Printf("Trio API: %s\n", runTrioAPI)
-	} else {
-		fmt.Printf("Trio API: %s (default)\n", vision.DefaultTrioAPIURL)
-	}
 
-	// Create handler
+	// Create gateway handler
 	handler := gateway.NewHandler(devices, trioClient, runCameras)
 
 	// Setup plugins (Hands)
 	registry := pluginpkg.NewRegistry()
-
-	// Home Assistant plugin
 	if runHAURL != "" && runHAToken != "" {
 		haPlugin := ha.New(runHAURL, runHAToken)
 		if err := registry.Register(haPlugin); err != nil {
-			return fmt.Errorf("failed to register HA plugin: %w", err)
+			return fmt.Errorf("register HA plugin: %w", err)
 		}
-		fmt.Printf("  + Home Assistant: %s\n", runHAURL)
+		fmt.Printf("plugin:    Home Assistant (%s)\n", runHAURL)
 	}
-
-	// Exec plugin (user scripts)
 	execPlugin, err := execplugin.New(runPluginDir)
-	if err != nil {
-		fmt.Printf("Warning: exec plugin init failed: %v\n", err)
-	} else {
-		if err := registry.Register(execPlugin); err != nil {
-			fmt.Printf("Warning: failed to register exec plugin: %v\n", err)
-		}
+	if err == nil {
+		_ = registry.Register(execPlugin)
 		if execPlugin.ScriptCount() > 0 {
-			fmt.Printf("  + Exec plugins: %d script(s)\n", execPlugin.ScriptCount())
+			fmt.Printf("plugin:    exec (%d scripts)\n", execPlugin.ScriptCount())
 		}
 	}
-
 	handler.SetPlugins(registry)
 
-	// Create client
-	client := gateway.NewClient(st.GatewayURL, st.Token)
-	client.SetNodeID(st.NodeID)
-
-	// Setup signal handling for graceful shutdown
+	// Setup signal handling
 	ctx, cancel := context.WithCancel(ctx)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		<-sigCh
-		fmt.Println("\nShutting down...")
+		fmt.Println("\nshutting down...")
 		cancel()
 	}()
 
-	// Run the client (blocks until context cancelled)
-	fmt.Println("\nStarting node...")
-	if err := client.Run(ctx, handler); err != nil {
-		return fmt.Errorf("run error: %w", err)
+	// ---------------------------------------------------------------
+	// Start trio-core watch manager (SSE streams for all cameras)
+	// ---------------------------------------------------------------
+	if len(cfg.Cameras) > 0 {
+		tcClient := triocore.NewClient(cfg.TrioCore.URL)
+		watchMgr := triocore.NewManager(tcClient, cfg.Cameras)
+
+		// Store all results in SQLite
+		watchMgr.OnResult(func(cameraID string, result triocore.ResultEvent) {
+			for _, cond := range result.Conditions {
+				_, err := eventStore.InsertEvent(&store.Event{
+					Timestamp:   parseTS(result.Timestamp),
+					CameraID:    cameraID,
+					WatchID:     result.WatchID,
+					ConditionID: cond.ID,
+					Answer:      cond.Answer,
+					Triggered:   cond.Triggered,
+					LatencyMs:   result.Metrics.LatencyMs,
+					FramesUsed:  result.Metrics.FramesAnalyzed,
+				})
+				if err != nil {
+					log.Printf("[store] insert result error: %v", err)
+				}
+			}
+		})
+
+		// Store alerts + push to gateway as proactive events
+		watchMgr.OnAlert(func(cameraID string, alert triocore.AlertEvent) {
+			for _, cond := range alert.Conditions {
+				if !cond.Triggered {
+					continue
+				}
+				_, err := eventStore.InsertAlert(&store.Event{
+					Timestamp:   parseTS(alert.Timestamp),
+					CameraID:    cameraID,
+					WatchID:     alert.WatchID,
+					ConditionID: cond.ID,
+					Answer:      cond.Answer,
+					Triggered:   true,
+					LatencyMs:   alert.Metrics.LatencyMs,
+					FramesUsed:  alert.Metrics.FramesAnalyzed,
+				})
+				if err != nil {
+					log.Printf("[store] insert alert error: %v", err)
+				}
+			}
+
+			// Push alert to OpenClaw gateway (if connected)
+			if gwClient != nil {
+				_ = gwClient.SendEvent("vision.alert", map[string]any{
+					"camera_id":  cameraID,
+					"watch_id":   alert.WatchID,
+					"ts":         alert.Timestamp,
+					"conditions": alert.Conditions,
+					"frame_b64":  alert.FrameB64,
+				})
+			}
+		})
+
+		// Run watch manager in background
+		go func() {
+			if err := watchMgr.Run(ctx); err != nil {
+				log.Printf("[watch-manager] error: %v", err)
+			}
+		}()
+		fmt.Println("\nstarted watch manager")
 	}
 
+	// ---------------------------------------------------------------
+	// Start OpenClaw gateway connection (if paired)
+	// ---------------------------------------------------------------
+	st, err := state.Load()
+	if err == nil && st.IsPaired() {
+		gwClient = gateway.NewClient(st.GatewayURL, st.Token)
+		gwClient.SetNodeID(st.NodeID)
+
+		fmt.Printf("\ngateway:   %s (node: %s)\n", st.GatewayURL, st.NodeID)
+
+		go func() {
+			if err := gwClient.Run(ctx, handler); err != nil {
+				log.Printf("[gateway] error: %v", err)
+			}
+		}()
+		fmt.Println("started gateway connection")
+	} else {
+		fmt.Println("\ngateway:   not paired (run 'trioclaw pair' to connect)")
+	}
+
+	fmt.Println("\ntrioclaw is running. Press Ctrl+C to stop.")
+
+	// Block until shutdown
+	<-ctx.Done()
 	return nil
+}
+
+// gwClient is the active gateway client (nil if not paired).
+// Used to push proactive events from watch alerts.
+var gwClient *gateway.Client
+
+func parseTS(ts string) time.Time {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return time.Now()
+	}
+	return t
 }
 
 // =============================================================================
@@ -575,6 +687,201 @@ func runUpdate() error {
 }
 
 // =============================================================================
+// trioclaw camera add|remove|list
+//
+// Manage cameras in config.yaml.
+// =============================================================================
+
+var cameraCmd = &cobra.Command{
+	Use:   "camera",
+	Short: "Manage cameras",
+}
+
+var cameraAddID string
+var cameraAddName string
+var cameraAddSource string
+var cameraAddQuestion string
+
+var cameraAddCmd = &cobra.Command{
+	Use:   "add",
+	Short: "Add a camera",
+	Long:  "Add a camera to config. Example: trioclaw camera add --id front-door --name \"Front Door\" --source rtsp://admin:pass@192.168.1.10:554/stream",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		cam := config.CameraConfig{
+			ID:     cameraAddID,
+			Name:   cameraAddName,
+			Source: cameraAddSource,
+			FPS:    1,
+		}
+
+		// Add default condition if question provided
+		if cameraAddQuestion != "" {
+			cam.Conditions = []config.ConditionConfig{
+				{
+					ID:       "default",
+					Question: cameraAddQuestion,
+				},
+			}
+		}
+
+		if err := cfg.AddCamera(cam); err != nil {
+			return err
+		}
+
+		if err := cfg.Save(); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+
+		fmt.Printf("Added camera %q (%s)\n", cam.ID, maskCredentials(cam.Source))
+		fmt.Printf("Config saved to: %s\n", config.DefaultConfigPath())
+		return nil
+	},
+}
+
+var cameraRemoveCmd = &cobra.Command{
+	Use:   "remove [camera-id]",
+	Short: "Remove a camera",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		if err := cfg.RemoveCamera(args[0]); err != nil {
+			return err
+		}
+
+		if err := cfg.Save(); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+
+		fmt.Printf("Removed camera %q\n", args[0])
+		return nil
+	},
+}
+
+var cameraListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List configured cameras",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		if len(cfg.Cameras) == 0 {
+			fmt.Println("No cameras configured.")
+			fmt.Println("Add one: trioclaw camera add --id my-cam --name \"My Camera\" --source rtsp://...")
+			return nil
+		}
+
+		fmt.Printf("Cameras (%d):\n", len(cfg.Cameras))
+		for _, cam := range cfg.Cameras {
+			// Mask credentials in source URL for display
+			displaySource := maskCredentials(cam.Source)
+			fmt.Printf("  %s\n", cam.ID)
+			fmt.Printf("    name:   %s\n", cam.Name)
+			fmt.Printf("    source: %s\n", displaySource)
+			if len(cam.Conditions) > 0 {
+				fmt.Printf("    conditions:\n")
+				for _, cond := range cam.Conditions {
+					actions := ""
+					if len(cond.Actions) > 0 {
+						actions = fmt.Sprintf(" -> [%s]", strings.Join(cond.Actions, ", "))
+					}
+					fmt.Printf("      - %s: %q%s\n", cond.ID, cond.Question, actions)
+				}
+			}
+		}
+		return nil
+	},
+}
+
+// maskCredentials replaces user:pass in URLs with ***:***
+func maskCredentials(source string) string {
+	if !strings.Contains(source, "@") {
+		return source
+	}
+	// Find :// then mask until @
+	idx := strings.Index(source, "://")
+	if idx < 0 {
+		return source
+	}
+	prefix := source[:idx+3]
+	rest := source[idx+3:]
+	atIdx := strings.Index(rest, "@")
+	if atIdx < 0 {
+		return source
+	}
+	return prefix + "***:***@" + rest[atIdx+1:]
+}
+
+// =============================================================================
+// trioclaw status
+//
+// Show current service status, active watches, recent alerts.
+// =============================================================================
+
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show service status and recent activity",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Load config
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		fmt.Printf("trio-core: %s\n", cfg.TrioCore.URL)
+		fmt.Printf("cameras:   %d configured\n", len(cfg.Cameras))
+
+		// Load state
+		st, err := state.Load()
+		if err == nil && st.IsPaired() {
+			fmt.Printf("gateway:   %s (paired)\n", st.GatewayURL)
+		} else {
+			fmt.Println("gateway:   not paired")
+		}
+
+		// Show store stats
+		eventStore, err := store.Open(store.DefaultDBPath())
+		if err != nil {
+			fmt.Printf("events db: error: %v\n", err)
+			return nil
+		}
+		defer eventStore.Close()
+
+		stats, err := eventStore.GetStats()
+		if err != nil {
+			fmt.Printf("events db: error: %v\n", err)
+			return nil
+		}
+
+		fmt.Printf("\nevents:    %d total, %d alerts, %d cameras\n",
+			stats.TotalEvents, stats.TotalAlerts, stats.CameraCount)
+
+		// Show recent alerts
+		alerts, err := eventStore.RecentAlerts(5)
+		if err == nil && len(alerts) > 0 {
+			fmt.Println("\nrecent alerts:")
+			for _, a := range alerts {
+				fmt.Printf("  [%s] %s/%s: %s\n",
+					a.Timestamp.Local().Format("2006-01-02 15:04:05"),
+					a.CameraID, a.ConditionID, a.Answer)
+			}
+		}
+
+		return nil
+	},
+}
+
+// =============================================================================
 // Init: wire up all commands and flags
 // =============================================================================
 
@@ -585,11 +892,23 @@ func init() {
 	pairCmd.MarkFlagRequired("gateway")
 
 	// run command flags
+	runCmd.Flags().StringVar(&runConfigPath, "config", "", "Config file path (default: ~/.trioclaw/config.yaml)")
 	runCmd.Flags().StringArrayVar(&runCameras, "camera", nil, "Additional camera source (rtsp:// URL or device path)")
-	runCmd.Flags().StringVar(&runTrioAPI, "trio-api", "", "Trio API URL (default: https://trio.machinefi.com)")
+	runCmd.Flags().StringVar(&runTrioAPI, "trio-api", "", "Trio-core URL (overrides config)")
 	runCmd.Flags().StringVar(&runHAURL, "ha-url", "", "Home Assistant URL (e.g. http://homeassistant.local:8123)")
 	runCmd.Flags().StringVar(&runHAToken, "ha-token", "", "Home Assistant long-lived access token")
 	runCmd.Flags().StringVar(&runPluginDir, "plugin-dir", "", "Directory for exec plugin scripts (default: ~/.trioclaw/plugins/)")
+
+	// camera command flags
+	cameraAddCmd.Flags().StringVar(&cameraAddID, "id", "", "Camera ID (required)")
+	cameraAddCmd.Flags().StringVar(&cameraAddName, "name", "", "Camera display name (required)")
+	cameraAddCmd.Flags().StringVar(&cameraAddSource, "source", "", "Camera source: RTSP URL or device path (required)")
+	cameraAddCmd.Flags().StringVar(&cameraAddQuestion, "question", "", "Default question to monitor (optional)")
+	cameraAddCmd.MarkFlagRequired("id")
+	cameraAddCmd.MarkFlagRequired("name")
+	cameraAddCmd.MarkFlagRequired("source")
+
+	cameraCmd.AddCommand(cameraAddCmd, cameraRemoveCmd, cameraListCmd)
 
 	// snap command flags
 	snapCmd.Flags().StringVar(&snapCamera, "camera", "", "Camera source (default: built-in webcam)")
@@ -601,7 +920,7 @@ func init() {
 	doctorCmd.Flags().StringVar(&doctorTrioAPI, "trio-api", "", "Trio API URL to check (default: https://trio.machinefi.com)")
 
 	// Add commands
-	rootCmd.AddCommand(pairCmd, runCmd, snapCmd, doctorCmd, versionCmd, updateCmd)
+	rootCmd.AddCommand(pairCmd, runCmd, snapCmd, cameraCmd, statusCmd, doctorCmd, versionCmd, updateCmd)
 }
 
 // nodeCapabilities returns caps and commands to advertise during pairing.
