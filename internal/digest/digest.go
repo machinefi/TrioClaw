@@ -199,13 +199,17 @@ func (r *Runner) callClaude(ctx context.Context, prompt string) (string, error) 
 }
 
 // callChatCompletions calls an OpenAI-compatible /v1/chat/completions endpoint.
+// model is optional — empty string omits it (local LLM will use its default).
 func (r *Runner) callChatCompletions(ctx context.Context, url, apiKey, prompt string) (string, error) {
 	body := map[string]any{
-		"model": "gpt-4o-mini",
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
 		"max_tokens": 1024,
+	}
+	// Only set model for cloud APIs; local LLM uses its default model
+	if apiKey != "" {
+		body["model"] = "gpt-4o-mini"
 	}
 
 	bodyJSON, _ := json.Marshal(body)

@@ -353,7 +353,17 @@ func runRun(ctx context.Context) error {
 			actions := dispatcher.GetActions(cameraID, cond.ID)
 			for _, action := range actions {
 				if action == "clip" {
-					if source, ok := cameraSources[cameraID]; ok {
+					source := cameraSources[cameraID]
+					// Also check dynamic watches
+					if source == "" {
+						for _, w := range watchMgr.Status() {
+							if w.CameraID == cameraID {
+								source = w.Source
+								break
+							}
+						}
+					}
+					if source != "" {
 						clipRec.SaveClip(source, cameraID, eventID)
 					}
 					break
@@ -395,7 +405,7 @@ func runRun(ctx context.Context) error {
 			addr = ":8080"
 		}
 		fmt.Printf("api:       http://localhost%s\n", addr)
-		if err := apiSrv.ListenAndServe(addr); err != nil {
+		if err := apiSrv.ListenAndServe(ctx, addr); err != nil {
 			log.Printf("[api] error: %v", err)
 		}
 	}()
@@ -458,7 +468,10 @@ func parseTS(ts string) time.Time {
 func parseCronHourMinute(cron string) string {
 	parts := strings.Fields(cron)
 	if len(parts) >= 2 {
-		return fmt.Sprintf("%s:%s", parts[1], parts[0])
+		var h, m int
+		fmt.Sscanf(parts[1], "%d", &h)
+		fmt.Sscanf(parts[0], "%d", &m)
+		return fmt.Sprintf("%02d:%02d", h, m)
 	}
 	return "22:00"
 }

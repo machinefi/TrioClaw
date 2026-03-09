@@ -14,11 +14,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -65,10 +66,23 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
-// ListenAndServe starts the HTTP server.
-func (s *Server) ListenAndServe(addr string) error {
+// ListenAndServe starts the HTTP server. It shuts down gracefully when ctx is cancelled.
+func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	srv := &http.Server{Addr: addr, Handler: s.mux}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutCtx)
+	}()
+
 	log.Printf("[api] listening on %s", addr)
-	return http.ListenAndServe(addr, s.mux)
+	err := srv.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 // handleHealthz returns 200 OK.
@@ -261,18 +275,16 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // handleClipFile serves a clip file by path.
 func (s *Server) handleClipFile(w http.ResponseWriter, r *http.Request) {
 	// Extract filename from /api/clips/{filename}
-	path := strings.TrimPrefix(r.URL.Path, "/api/clips/")
-	if path == "" {
+	name := strings.TrimPrefix(r.URL.Path, "/api/clips/")
+	if name == "" {
 		writeError(w, http.StatusBadRequest, "clip path required")
 		return
 	}
 
-	// Only serve from clips directory
-	clipDir := s.cfg.Clips.Dir
-	fullPath := fmt.Sprintf("%s/%s", clipDir, path)
-
-	// Prevent directory traversal
-	if strings.Contains(path, "..") {
+	// Resolve and validate path stays within clip directory
+	clipDir, _ := filepath.Abs(s.cfg.Clips.Dir)
+	fullPath, _ := filepath.Abs(filepath.Join(clipDir, name))
+	if !strings.HasPrefix(fullPath, clipDir+string(filepath.Separator)) {
 		writeError(w, http.StatusForbidden, "invalid path")
 		return
 	}
