@@ -146,10 +146,12 @@ func runPair(ctx context.Context) error {
 //
 // Lifecycle:
 //   1. Load YAML config (~/.trioclaw/config.yaml)
-//   2. Open SQLite event store
-//   3. Start watch manager (SSE per camera → SQLite + gateway alerts)
-//   4. Connect to OpenClaw gateway (if paired)
-//   5. Block until SIGINT/SIGTERM → graceful shutdown
+//   2. Ensure trio-core is available (detect / install / use cloud)
+//   3. Open SQLite event store
+//   4. Start watch manager (SSE per camera → SQLite + gateway alerts)
+//   5. Start HTTP API server (:8080)
+//   6. Connect to OpenClaw gateway (if paired)
+//   7. Block until SIGINT/SIGTERM → graceful shutdown
 // =============================================================================
 
 var runConfigPath string // config file path
@@ -196,7 +198,27 @@ func runRun(ctx context.Context) error {
 		})
 	}
 
-	fmt.Printf("trio-core: %s\n", cfg.TrioCore.URL)
+	// ---------------------------------------------------------------
+	// Ensure trio-core is available (detect / install / cloud)
+	// ---------------------------------------------------------------
+	origURL := cfg.TrioCore.URL
+	setup, err := triocore.EnsureTrioCore(ctx, cfg.TrioCore.URL)
+	if err != nil {
+		return fmt.Errorf("trio-core setup: %w", err)
+	}
+	cfg.TrioCore.URL = setup.URL
+
+	// If we started a local process, clean it up on shutdown
+	if setup.Process != nil {
+		defer triocore.StopProcess(setup.Process)
+	}
+
+	// Persist updated URL if it changed (e.g. user chose cloud)
+	if setup.URL != origURL {
+		_ = cfg.Save()
+	}
+
+	fmt.Printf("\ntrio-core: %s\n", cfg.TrioCore.URL)
 	fmt.Printf("cameras:   %d configured\n", len(cfg.Cameras))
 	for _, cam := range cfg.Cameras {
 		fmt.Printf("  - %s: %s (%s)\n", cam.ID, cam.Name, maskCredentials(cam.Source))
