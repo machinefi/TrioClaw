@@ -5,15 +5,19 @@
 //   - Gateway protocol (invoke requests/results)
 //   - Capture layer (ffmpeg camera/mic access)
 //   - Vision layer (Trio API for VLM analysis)
+//   - Watch manager (trio-core SSE streams for continuous monitoring)
 //   - Plugin layer (device control via Home Assistant, scripts, etc.)
 //
 // Command routing:
-//   "camera.snap"     → capture.CaptureFrame → base64 JPEG → invoke result
-//   "camera.list"     → capture.ListDevices → device list → invoke result
-//   "camera.clip"     → capture.RecordClip → base64 MP4 → invoke result
-//   "vision.analyze"  → capture.CaptureFrame → vision.Analyze → text → invoke result
-//   "device.list"     → plugin.Registry.ListAllDevices → device list → invoke result
-//   "device.control"  → plugin.Registry.Execute → result → invoke result
+//   "camera.snap"       → capture.CaptureFrame → base64 JPEG → invoke result
+//   "camera.list"       → capture.ListDevices → device list → invoke result
+//   "camera.clip"       → capture.RecordClip → base64 MP4 → invoke result
+//   "vision.analyze"    → capture.CaptureFrame → vision.Analyze → text → invoke result
+//   "vision.watch"      → watchMgr.StartDynamicWatch → start SSE stream → invoke result
+//   "vision.watch.stop" → watchMgr.StopDynamicWatch → stop SSE stream → invoke result
+//   "vision.status"     → watchMgr.Status → active watches → invoke result
+//   "device.list"       → plugin.Registry.ListAllDevices → device list → invoke result
+//   "device.control"    → plugin.Registry.Execute → result → invoke result
 package gateway
 
 import (
@@ -21,9 +25,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/machinefi/trioclaw/internal/capture"
 	"github.com/machinefi/trioclaw/internal/config"
+	"github.com/machinefi/trioclaw/internal/notify"
 	"github.com/machinefi/trioclaw/internal/plugin"
 	"github.com/machinefi/trioclaw/internal/triocore"
 	"github.com/machinefi/trioclaw/internal/vision"
@@ -36,6 +42,7 @@ type Handler struct {
 	extraCameras []string              // additional camera sources (RTSP URLs, etc.)
 	plugins      *plugin.Registry      // device control plugins
 	watchMgr     *triocore.Manager     // watch manager for vision.watch commands
+	dispatcher   *notify.Dispatcher   // notification dispatcher for dynamic watch actions
 	nodeID       string                // this node's ID
 }
 
@@ -57,6 +64,11 @@ func (h *Handler) SetPlugins(registry *plugin.Registry) {
 // SetWatchManager sets the watch manager for vision.watch commands.
 func (h *Handler) SetWatchManager(mgr *triocore.Manager) {
 	h.watchMgr = mgr
+}
+
+// SetDispatcher sets the notification dispatcher for dynamic watch actions.
+func (h *Handler) SetDispatcher(d *notify.Dispatcher) {
+	h.dispatcher = d
 }
 
 // SetNodeID sets the node ID for invoke results.
@@ -442,6 +454,15 @@ func (h *Handler) handleVisionWatch(ctx context.Context, req InvokeRequest) Invo
 		return h.errorResult(req, "WATCH_FAILED", fmt.Sprintf("failed to start watch: %v", err))
 	}
 
+	// Register condition actions in notification dispatcher
+	if h.dispatcher != nil {
+		for _, cond := range params.Conditions {
+			if len(cond.Actions) > 0 {
+				h.dispatcher.SetActions(params.CameraID, cond.ID, cond.Actions)
+			}
+		}
+	}
+
 	result := VisionWatchResult{
 		CameraID: params.CameraID,
 		Status:   "started",
@@ -497,7 +518,7 @@ func (h *Handler) handleVisionStatus(ctx context.Context, req InvokeRequest) Inv
 		watches = append(watches, VisionStatusEntry{
 			CameraID: e.CameraID,
 			WatchID:  e.WatchID,
-			Source:   e.Source,
+			Source:   maskSource(e.Source),
 			State:    e.State,
 		})
 	}
@@ -512,6 +533,23 @@ func (h *Handler) handleVisionStatus(ctx context.Context, req InvokeRequest) Inv
 		OK:     true,
 		Result: marshalResult(result),
 	}
+}
+
+// maskSource hides credentials in RTSP URLs (rtsp://user:pass@host → rtsp://***:***@host).
+func maskSource(source string) string {
+	if !strings.Contains(source, "@") {
+		return source
+	}
+	idx := strings.Index(source, "://")
+	if idx < 0 {
+		return source
+	}
+	rest := source[idx+3:]
+	atIdx := strings.Index(rest, "@")
+	if atIdx < 0 {
+		return source
+	}
+	return source[:idx+3] + "***:***@" + rest[atIdx+1:]
 }
 
 // errorResult is a helper to build error InvokeResults.

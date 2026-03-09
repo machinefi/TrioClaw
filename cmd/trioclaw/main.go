@@ -349,8 +349,9 @@ func runRun(ctx context.Context) error {
 		}
 	})
 
-	// Pass watch manager to gateway handler
+	// Pass watch manager and dispatcher to gateway handler
 	handler.SetWatchManager(watchMgr)
+	handler.SetDispatcher(dispatcher)
 
 	// Run watch manager in background
 	go func() {
