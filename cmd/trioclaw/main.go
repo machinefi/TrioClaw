@@ -26,8 +26,11 @@ import (
 
 	"encoding/base64"
 
+	"github.com/machinefi/trioclaw/internal/api"
 	"github.com/machinefi/trioclaw/internal/capture"
+	"github.com/machinefi/trioclaw/internal/clip"
 	"github.com/machinefi/trioclaw/internal/config"
+	"github.com/machinefi/trioclaw/internal/digest"
 	"github.com/machinefi/trioclaw/internal/gateway"
 	"github.com/machinefi/trioclaw/internal/notify"
 	pluginpkg "github.com/machinefi/trioclaw/internal/plugin"
@@ -155,6 +158,7 @@ var runTrioAPI string    // Trio API URL (overrides config)
 var runHAURL string      // Home Assistant URL
 var runHAToken string    // Home Assistant long-lived access token
 var runPluginDir string  // custom plugin scripts directory
+var runListenAddr string // HTTP API listen address
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -274,6 +278,15 @@ func runRun(ctx context.Context) error {
 	}
 
 	// ---------------------------------------------------------------
+	// Setup clip recorder
+	// ---------------------------------------------------------------
+	clipRec := clip.NewRecorder(cfg.Clips.Dir, cfg.Clips.PostSeconds, eventStore)
+	cameraSources := make(map[string]string)
+	for _, cam := range cfg.Cameras {
+		cameraSources[cam.ID] = cam.Source
+	}
+
+	// ---------------------------------------------------------------
 	// Start trio-core watch manager (SSE streams for all cameras)
 	// ---------------------------------------------------------------
 	tcClient := triocore.NewClient(cfg.TrioCore.URL)
@@ -298,7 +311,7 @@ func runRun(ctx context.Context) error {
 		}
 	})
 
-	// Store alerts + notify + push to gateway
+	// Store alerts + notify + clip + push to gateway
 	watchMgr.OnAlert(func(cameraID string, alert triocore.AlertEvent) {
 		// Decode frame for notifications
 		var frameJPEG []byte
@@ -312,7 +325,7 @@ func runRun(ctx context.Context) error {
 			}
 
 			// Store in SQLite
-			_, err := eventStore.InsertAlert(&store.Event{
+			eventID, err := eventStore.InsertAlert(&store.Event{
 				Timestamp:   parseTS(alert.Timestamp),
 				CameraID:    cameraID,
 				WatchID:     alert.WatchID,
@@ -335,6 +348,17 @@ func runRun(ctx context.Context) error {
 				Timestamp:   parseTS(alert.Timestamp),
 				FrameJPEG:   frameJPEG,
 			})
+
+			// Save clip if "clip" is in the condition's actions
+			actions := dispatcher.GetActions(cameraID, cond.ID)
+			for _, action := range actions {
+				if action == "clip" {
+					if source, ok := cameraSources[cameraID]; ok {
+						clipRec.SaveClip(source, cameraID, eventID)
+					}
+					break
+				}
+			}
 		}
 
 		// Push alert to OpenClaw gateway (if connected)
@@ -360,6 +384,36 @@ func runRun(ctx context.Context) error {
 		}
 	}()
 	fmt.Println("\nstarted watch manager")
+
+	// ---------------------------------------------------------------
+	// Start HTTP API server
+	// ---------------------------------------------------------------
+	apiSrv := api.NewServer(cfg, eventStore, watchMgr)
+	go func() {
+		addr := runListenAddr
+		if addr == "" {
+			addr = ":8080"
+		}
+		fmt.Printf("api:       http://localhost%s\n", addr)
+		if err := apiSrv.ListenAndServe(addr); err != nil {
+			log.Printf("[api] error: %v", err)
+		}
+	}()
+
+	// ---------------------------------------------------------------
+	// Start daily digest (if enabled)
+	// ---------------------------------------------------------------
+	if cfg.Digest.Enabled && len(cfg.Digest.PushTo) > 0 {
+		digestRunner := digest.NewRunner(eventStore, dispatcher, digest.Config{
+			LLM:    cfg.Digest.LLM,
+			LLMURL: cfg.TrioCore.URL,
+			PushTo: cfg.Digest.PushTo,
+		})
+		// Parse schedule "0 22 * * *" -> extract hour:minute
+		hourMin := parseCronHourMinute(cfg.Digest.Schedule)
+		go digestRunner.RunSchedule(ctx, hourMin)
+		fmt.Printf("digest:    daily at %s\n", hourMin)
+	}
 
 	// ---------------------------------------------------------------
 	// Start OpenClaw gateway connection (if paired)
@@ -398,6 +452,15 @@ func parseTS(ts string) time.Time {
 		return time.Now()
 	}
 	return t
+}
+
+// parseCronHourMinute extracts "HH:MM" from a cron expression like "0 22 * * *".
+func parseCronHourMinute(cron string) string {
+	parts := strings.Fields(cron)
+	if len(parts) >= 2 {
+		return fmt.Sprintf("%s:%s", parts[1], parts[0])
+	}
+	return "22:00"
 }
 
 // =============================================================================
@@ -946,6 +1009,7 @@ func init() {
 	runCmd.Flags().StringVar(&runHAURL, "ha-url", "", "Home Assistant URL (e.g. http://homeassistant.local:8123)")
 	runCmd.Flags().StringVar(&runHAToken, "ha-token", "", "Home Assistant long-lived access token")
 	runCmd.Flags().StringVar(&runPluginDir, "plugin-dir", "", "Directory for exec plugin scripts (default: ~/.trioclaw/plugins/)")
+	runCmd.Flags().StringVar(&runListenAddr, "listen", ":8080", "HTTP API listen address")
 
 	// camera command flags
 	cameraAddCmd.Flags().StringVar(&cameraAddID, "id", "", "Camera ID (required)")
