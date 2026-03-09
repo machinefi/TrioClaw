@@ -1,7 +1,7 @@
 // e2e_test.go contains end-to-end tests for TrioClaw.
 //
 // These tests verify the complete functionality of the CLI and internal components.
-// They require ffmpeg to be installed on the system.
+// TrioClaw does NOT touch RTSP/ffmpeg/inference — it calls trio-core for that.
 //
 // Run with: go test ./e2e/... -v
 package e2e
@@ -248,10 +248,13 @@ func TestE2E_StateFileOperations(t *testing.T) {
 	}
 }
 
-// Test mock Trio API interaction
+// Test mock trio-core /analyze-frame interaction
 func TestE2E_MockTrioAPI(t *testing.T) {
-	// Create a mock Trio API server
+	// Create a mock trio-core server with /analyze-frame endpoint
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/analyze-frame" {
+			t.Errorf("Expected /analyze-frame, got %s", r.URL.Path)
+		}
 		if r.Method != http.MethodPost {
 			t.Errorf("Expected POST, got %s", r.Method)
 		}
@@ -267,19 +270,18 @@ func TestE2E_MockTrioAPI(t *testing.T) {
 			t.Errorf("Failed to unmarshal request: %v", err)
 		}
 
-		if req["stream_url"] == nil {
-			t.Error("Request missing stream_url field")
+		if req["source"] == nil {
+			t.Error("Request missing source field")
 		}
 
-		if req["condition"] == nil {
-			t.Error("Request missing condition field")
+		if req["question"] == nil {
+			t.Error("Request missing question field")
 		}
 
 		// Return mock response
 		resp := map[string]interface{}{
-			"triggered":   true,
-			"explanation": "A person is visible in the frame",
-			"confidence":  0.95,
+			"answer":     "Yes, a person is visible in the frame",
+			"confidence": 0.95,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -291,10 +293,10 @@ func TestE2E_MockTrioAPI(t *testing.T) {
 	// Create a client pointing to mock server
 	mockClient := &http.Client{Timeout: 5 * time.Second}
 
-	// Make a test request
-	testReq, _ := http.NewRequest("POST", server.URL+"/api/v1/check-once", strings.NewReader(`{
-		"stream_url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP8=",
-		"condition": "Is there a person?"
+	// Make a test request to /analyze-frame (trio-core endpoint)
+	testReq, _ := http.NewRequest("POST", server.URL+"/analyze-frame", strings.NewReader(`{
+		"source": "rtsp://admin:pass@192.168.1.10:554/stream",
+		"question": "Is there a person?"
 	}`))
 	testReq.Header.Set("Content-Type", "application/json")
 
@@ -313,12 +315,8 @@ func TestE2E_MockTrioAPI(t *testing.T) {
 		t.Fatalf("Failed to decode API response: %v", err)
 	}
 
-	if apiResp["triggered"] != true {
-		t.Errorf("Expected triggered=true, got %v", apiResp["triggered"])
-	}
-
-	if apiResp["explanation"] == nil {
-		t.Error("Expected explanation field")
+	if apiResp["answer"] == nil {
+		t.Error("Expected answer field")
 	}
 }
 

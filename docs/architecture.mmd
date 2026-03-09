@@ -1,0 +1,91 @@
+%%{init: {'theme': 'dark', 'themeVariables': {'primaryColor': '#58a6ff', 'primaryTextColor': '#e6edf3', 'primaryBorderColor': '#30363d', 'lineColor': '#8b949e', 'secondaryColor': '#161b22', 'tertiaryColor': '#0d1117'}}}%%
+
+graph TB
+    subgraph User["User / AI Agent"]
+        Browser["Browser<br/>:8080"]
+        CLI["trioclaw CLI"]
+        Gateway["OpenClaw Gateway<br/>(WebSocket)"]
+    end
+
+    subgraph TrioClaw["TrioClaw (single Go binary)"]
+        direction TB
+
+        subgraph Entry["Entry Points"]
+            API["HTTP API Server<br/>/api/* endpoints"]
+            Dashboard["Web Dashboard<br/>embed.FS → /"]
+            GWClient["Gateway Client<br/>WebSocket reconnect"]
+            CMDRun["cmd: run"]
+        end
+
+        subgraph Core["Core Engine"]
+            WatchMgr["Watch Manager<br/>per-camera goroutine"]
+            Config["Config<br/>~/.trioclaw/config.yaml"]
+            Store["SQLite Store<br/>WAL mode<br/>events + alerts"]
+        end
+
+        subgraph Actions["Action Layer"]
+            Dispatcher["Notification Dispatcher<br/>condition → actions routing"]
+            Digest["Daily Digest<br/>LLM summary"]
+        end
+
+        subgraph Notify["Notification Channels"]
+            Webhook["Webhook<br/>POST JSON"]
+            Telegram["Telegram<br/>Bot API + photo"]
+            Slack["Slack<br/>Incoming Webhook"]
+        end
+
+        subgraph Plugins["Plugin System"]
+            Registry["Plugin Registry"]
+            HA["Home Assistant"]
+            Exec["Exec Scripts<br/>~/.trioclaw/plugins/"]
+        end
+    end
+
+    subgraph External["trio-core (Python)"]
+        TrioCore["POST /v1/watch (SSE)<br/>GET /v1/watch<br/>DELETE /v1/watch/{id}<br/>POST /analyze-frame"]
+        FFmpeg["ffmpeg capture"]
+        VLM["VLM inference<br/>(Ollama / OpenAI)"]
+        Camera["RTSP Camera<br/>IP / USB / Webcam"]
+    end
+
+    %% User → TrioClaw
+    Browser -->|"fetch /api/*"| API
+    Browser -->|"GET /"| Dashboard
+    CLI -->|"cobra commands"| CMDRun
+    Gateway <-->|"WebSocket v3"| GWClient
+
+    %% Entry → Core
+    CMDRun --> Config
+    CMDRun --> WatchMgr
+    CMDRun --> API
+    API --> Store
+    API --> WatchMgr
+    GWClient --> WatchMgr
+
+    %% Core flow
+    Config -->|"cameras[]"| WatchMgr
+    WatchMgr -->|"POST /v1/watch"| TrioCore
+    TrioCore -->|"SSE events"| WatchMgr
+    WatchMgr -->|"results"| Store
+    WatchMgr -->|"alerts"| Dispatcher
+    WatchMgr -->|"alerts"| Store
+
+    %% trio-core internals
+    TrioCore --> FFmpeg
+    FFmpeg -->|"RTSP"| Camera
+    TrioCore --> VLM
+
+    %% Actions
+    Dispatcher -->|"webhook"| Webhook
+    Dispatcher -->|"telegram"| Telegram
+    Dispatcher -->|"slack"| Slack
+
+    %% Digest
+    Digest -->|"query alerts"| Store
+    Digest -->|"LLM"| TrioCore
+    Digest -->|"send"| Dispatcher
+
+    %% Plugins
+    GWClient -->|"device.control"| Registry
+    Registry --> HA
+    Registry --> Exec

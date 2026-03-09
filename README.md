@@ -257,34 +257,41 @@ When connected to a Gateway, TrioClaw responds to these invoke commands:
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  TrioClaw (single Go binary)                                    │
-│                                                                 │
-│   Config ──→ Watch Manager ──→ trio-core SSE streams            │
-│              (per camera)      /vision/watch                    │
-│                    │                                            │
-│                    ├─→ SQLite (events + alerts)                 │
-│                    ├─→ Notification Dispatcher                  │
-│                    │     ├─→ Webhook                            │
-│                    │     ├─→ Telegram (message + photo)         │
-│                    │     └─→ Slack                              │
-│                    ├─→ Clip Recorder (ffmpeg -c:v copy)         │
-│                    └─→ OpenClaw Gateway (vision.alert event)    │
-│                                                                 │
-│   HTTP API (:8080)                                              │
-│     /api/status, /api/cameras, /api/events, /api/alerts, ...   │
-│                                                                 │
-│   Daily Digest                                                  │
-│     LLM summary ──→ Notification Dispatcher                    │
-│                                                                 │
-│   Plugin System                                                 │
-│     Home Assistant, exec scripts                                │
-└─────────────────────────────────────────────────────────────────┘
+                        TrioClaw (Go)                    trio-core (Python)
+                    ┌───────────────────┐            ┌──────────────────────┐
+  User / AI ───→    │  Config Manager   │            │  RTSP capture        │
+                    │  (cameras, conds) │            │  (ffmpeg subprocess) │
+                    │        │          │            │        │             │
+                    │  Watch Manager    │──POST /v1/watch──→  │             │
+                    │  (per camera)     │            │  VLM inference       │
+                    │        │          │←──SSE stream────    │             │
+                    │        │          │            │  (Ollama / OpenAI)   │
+                    │        ├─→ SQLite │            └──────────────────────┘
+                    │        ├─→ Notify │
+                    │        │   ├─→ Webhook
+                    │        │   ├─→ Telegram
+                    │        │   └─→ Slack
+                    │        └─→ Gateway
+                    │                   │
+                    │  HTTP API (:8080) │
+                    │  Web Dashboard    │
+                    │  Plugin System    │
+                    └───────────────────┘
 ```
+
+**TrioClaw does NOT touch RTSP, ffmpeg, or inference.** It is purely the application layer:
+
+1. Stores camera RTSP addresses and watch conditions in config
+2. Calls `POST /v1/watch` on trio-core, passing RTSP URL + conditions
+3. Reads the SSE event stream, stores results in SQLite, sends notifications
+4. Serves the web dashboard and REST API
+
+trio-core handles all the heavy lifting: RTSP capture via ffmpeg, VLM inference via Ollama/OpenAI, and streaming results back over SSE.
 
 ### Key Design Decisions
 
-- **Zero CGO** — all device access through ffmpeg subprocess; SQLite via modernc.org/sqlite (pure Go)
+- **Clear separation** — TrioClaw = app layer (config, storage, notifications, dashboard); trio-core = inference layer (RTSP, ffmpeg, VLM)
+- **Zero CGO** — SQLite via modernc.org/sqlite (pure Go)
 - **SSE-based monitoring** — trio-core streams results/alerts over Server-Sent Events, no polling
 - **Credential masking** — RTSP passwords are masked (`***:***@host`) in all API responses and logs
 - **Path traversal protection** — clip serving endpoint validates paths stay within clip directory

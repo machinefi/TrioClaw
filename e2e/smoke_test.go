@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/machinefi/trioclaw/internal/api"
-	"github.com/machinefi/trioclaw/internal/clip"
 	"github.com/machinefi/trioclaw/internal/config"
 	"github.com/machinefi/trioclaw/internal/digest"
 	"github.com/machinefi/trioclaw/internal/notify"
@@ -51,7 +50,7 @@ func TestSmoke_FullStack(t *testing.T) {
 				Source: "rtsp://admin:pass@192.168.1.10:554/stream",
 				FPS:    1,
 				Conditions: []config.ConditionConfig{
-					{ID: "person", Question: "Is there a person?", Actions: []string{"webhook", "clip"}},
+					{ID: "person", Question: "Is there a person?", Actions: []string{"webhook", "telegram"}},
 					{ID: "package", Question: "Is there a package?", Actions: []string{"webhook"}},
 				},
 			},
@@ -64,11 +63,6 @@ func TestSmoke_FullStack(t *testing.T) {
 					{ID: "car", Question: "Is the garage door open?", Actions: []string{"slack"}},
 				},
 			},
-		},
-		Clips: config.ClipConfig{
-			Dir:         filepath.Join(tmpDir, "clips"),
-			PreSeconds:  5,
-			PostSeconds: 10,
 		},
 		Digest: config.DigestConfig{
 			Enabled:  true,
@@ -113,12 +107,6 @@ func TestSmoke_FullStack(t *testing.T) {
 	// Verify watch manager was created
 	if watchMgr == nil {
 		t.Fatal("watch manager is nil")
-	}
-
-	// --- Clip recorder ---
-	clipRec := clip.NewRecorder(cfg.Clips.Dir, cfg.Clips.PostSeconds, eventStore)
-	if clipRec == nil {
-		t.Fatal("clip recorder is nil")
 	}
 
 	// --- API server ---
@@ -173,17 +161,6 @@ func TestSmoke_FullStack(t *testing.T) {
 		}
 		if eventID <= 0 {
 			t.Error("expected positive eventID")
-		}
-
-		// Insert clip record
-		_, err = eventStore.InsertClip(&store.Clip{
-			EventID:  eventID,
-			Path:     filepath.Join(tmpDir, "clips", "front-door_20260309_210512.mp4"),
-			Duration: 10000,
-			Created:  time.Now(),
-		})
-		if err != nil {
-			t.Fatal(err)
 		}
 
 		// Query stats
@@ -419,25 +396,6 @@ func TestSmoke_FullStack(t *testing.T) {
 		}
 	})
 
-	t.Run("api_clip_traversal_blocked", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/clips/../../../etc/passwd", nil)
-		w := httptest.NewRecorder()
-		apiSrv.Handler().ServeHTTP(w, req)
-
-		if w.Code == 200 {
-			t.Error("path traversal should be blocked")
-		}
-	})
-
-	t.Run("api_clip_not_found", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/clips/nonexistent.mp4", nil)
-		w := httptest.NewRecorder()
-		apiSrv.Handler().ServeHTTP(w, req)
-
-		if w.Code != 404 {
-			t.Errorf("status = %d, want 404", w.Code)
-		}
-	})
 }
 
 // =============================================================================
@@ -776,7 +734,7 @@ func TestSmoke_ConfigRoundTrip(t *testing.T) {
 				Source: "rtsp://admin:pass@192.168.1.10:554/stream",
 				FPS:    1,
 				Conditions: []config.ConditionConfig{
-					{ID: "person", Question: "Is there a person?", Actions: []string{"telegram", "clip"}},
+					{ID: "person", Question: "Is there a person?", Actions: []string{"telegram", "webhook"}},
 				},
 			},
 		},
@@ -784,7 +742,6 @@ func TestSmoke_ConfigRoundTrip(t *testing.T) {
 			Telegram: &config.TelegramConfig{BotToken: "123:ABC", ChatID: "-100123"},
 			Webhook:  &config.WebhookConfig{URL: "https://example.com/hook", Headers: map[string]string{"X-Auth": "secret"}},
 		},
-		Clips: config.ClipConfig{Dir: "/tmp/clips", PreSeconds: 15, PostSeconds: 15},
 		Digest: config.DigestConfig{Enabled: true, Schedule: "0 22 * * *", LLM: "local", PushTo: []string{"telegram"}},
 	}
 
