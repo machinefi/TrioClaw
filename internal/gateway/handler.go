@@ -23,17 +23,20 @@ import (
 	"fmt"
 
 	"github.com/machinefi/trioclaw/internal/capture"
+	"github.com/machinefi/trioclaw/internal/config"
 	"github.com/machinefi/trioclaw/internal/plugin"
+	"github.com/machinefi/trioclaw/internal/triocore"
 	"github.com/machinefi/trioclaw/internal/vision"
 )
 
 // Handler processes invoke requests from the gateway.
 type Handler struct {
-	devices      []capture.Device    // available devices
-	trioClient   *vision.TrioClient  // Trio API client for VLM
-	extraCameras []string            // additional camera sources (RTSP URLs, etc.)
-	plugins      *plugin.Registry    // device control plugins
-	nodeID       string              // this node's ID
+	devices      []capture.Device      // available devices
+	trioClient   *vision.TrioClient    // Trio API client for VLM
+	extraCameras []string              // additional camera sources (RTSP URLs, etc.)
+	plugins      *plugin.Registry      // device control plugins
+	watchMgr     *triocore.Manager     // watch manager for vision.watch commands
+	nodeID       string                // this node's ID
 }
 
 // NewHandler creates a handler with discovered devices and a Trio API client.
@@ -49,6 +52,11 @@ func NewHandler(devices []capture.Device, trioClient *vision.TrioClient, extraCa
 // SetPlugins sets the plugin registry for device control.
 func (h *Handler) SetPlugins(registry *plugin.Registry) {
 	h.plugins = registry
+}
+
+// SetWatchManager sets the watch manager for vision.watch commands.
+func (h *Handler) SetWatchManager(mgr *triocore.Manager) {
+	h.watchMgr = mgr
 }
 
 // SetNodeID sets the node ID for invoke results.
@@ -71,6 +79,12 @@ func (h *Handler) HandleInvoke(ctx context.Context, req InvokeRequest) InvokeRes
 		return h.handleCameraClip(ctx, req)
 	case "vision.analyze":
 		return h.handleVisionAnalyze(ctx, req)
+	case "vision.watch":
+		return h.handleVisionWatch(ctx, req)
+	case "vision.watch.stop":
+		return h.handleVisionWatchStop(ctx, req)
+	case "vision.status":
+		return h.handleVisionStatus(ctx, req)
 	case "device.list":
 		return h.handleDeviceList(ctx, req)
 	case "device.control":
@@ -382,6 +396,132 @@ func isExtraCameraID(id string) bool {
 	}
 	prefix := id[:7]
 	return prefix == "extra-"
+}
+
+// =============================================================================
+// Vision watch handlers (continuous monitoring)
+// =============================================================================
+
+// handleVisionWatch starts a new watch via the watch manager.
+func (h *Handler) handleVisionWatch(ctx context.Context, req InvokeRequest) InvokeResult {
+	if h.watchMgr == nil {
+		return h.errorResult(req, "UNAVAILABLE", "watch manager not available")
+	}
+
+	var params VisionWatchParams
+	if err := DecodePayloadJSON(string(req.Params), &params); err != nil {
+		return h.errorResult(req, "INVALID_PARAMS", fmt.Sprintf("failed to parse params: %v", err))
+	}
+
+	if params.CameraID == "" {
+		return h.errorResult(req, "INVALID_PARAMS", "cameraId is required")
+	}
+	if params.Source == "" {
+		return h.errorResult(req, "INVALID_PARAMS", "source is required")
+	}
+
+	// Convert to config.CameraConfig
+	cam := config.CameraConfig{
+		ID:     params.CameraID,
+		Name:   params.CameraID,
+		Source: params.Source,
+		FPS:    params.FPS,
+	}
+	if cam.FPS <= 0 {
+		cam.FPS = 1
+	}
+	for _, cond := range params.Conditions {
+		cam.Conditions = append(cam.Conditions, config.ConditionConfig{
+			ID:       cond.ID,
+			Question: cond.Question,
+			Actions:  cond.Actions,
+		})
+	}
+
+	if err := h.watchMgr.StartDynamicWatch(cam); err != nil {
+		return h.errorResult(req, "WATCH_FAILED", fmt.Sprintf("failed to start watch: %v", err))
+	}
+
+	result := VisionWatchResult{
+		CameraID: params.CameraID,
+		Status:   "started",
+	}
+	return InvokeResult{
+		ID:     req.ID,
+		NodeID: h.nodeID,
+		OK:     true,
+		Result: marshalResult(result),
+	}
+}
+
+// handleVisionWatchStop stops an active watch.
+func (h *Handler) handleVisionWatchStop(ctx context.Context, req InvokeRequest) InvokeResult {
+	if h.watchMgr == nil {
+		return h.errorResult(req, "UNAVAILABLE", "watch manager not available")
+	}
+
+	var params VisionWatchStopParams
+	if err := DecodePayloadJSON(string(req.Params), &params); err != nil {
+		return h.errorResult(req, "INVALID_PARAMS", fmt.Sprintf("failed to parse params: %v", err))
+	}
+
+	if params.CameraID == "" {
+		return h.errorResult(req, "INVALID_PARAMS", "cameraId is required")
+	}
+
+	if err := h.watchMgr.StopDynamicWatch(ctx, params.CameraID); err != nil {
+		return h.errorResult(req, "WATCH_STOP_FAILED", err.Error())
+	}
+
+	result := VisionWatchStopResult{
+		CameraID: params.CameraID,
+		Status:   "stopped",
+	}
+	return InvokeResult{
+		ID:     req.ID,
+		NodeID: h.nodeID,
+		OK:     true,
+		Result: marshalResult(result),
+	}
+}
+
+// handleVisionStatus returns all active watches.
+func (h *Handler) handleVisionStatus(ctx context.Context, req InvokeRequest) InvokeResult {
+	if h.watchMgr == nil {
+		return h.errorResult(req, "UNAVAILABLE", "watch manager not available")
+	}
+
+	entries := h.watchMgr.Status()
+	var watches []VisionStatusEntry
+	for _, e := range entries {
+		watches = append(watches, VisionStatusEntry{
+			CameraID: e.CameraID,
+			WatchID:  e.WatchID,
+			Source:   e.Source,
+			State:    e.State,
+		})
+	}
+	if watches == nil {
+		watches = []VisionStatusEntry{} // ensure JSON [] not null
+	}
+
+	result := VisionStatusResult{Watches: watches}
+	return InvokeResult{
+		ID:     req.ID,
+		NodeID: h.nodeID,
+		OK:     true,
+		Result: marshalResult(result),
+	}
+}
+
+// errorResult is a helper to build error InvokeResults.
+func (h *Handler) errorResult(req InvokeRequest, code, message string) InvokeResult {
+	return InvokeResult{
+		ID:     req.ID,
+		NodeID: h.nodeID,
+		OK:     false,
+		Error:  &ErrorPayload{Code: code, Message: message},
+	}
 }
 
 // =============================================================================

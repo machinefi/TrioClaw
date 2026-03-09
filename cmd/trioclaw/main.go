@@ -24,9 +24,12 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/base64"
+
 	"github.com/machinefi/trioclaw/internal/capture"
 	"github.com/machinefi/trioclaw/internal/config"
 	"github.com/machinefi/trioclaw/internal/gateway"
+	"github.com/machinefi/trioclaw/internal/notify"
 	pluginpkg "github.com/machinefi/trioclaw/internal/plugin"
 	"github.com/machinefi/trioclaw/internal/plugin/execplugin"
 	ha "github.com/machinefi/trioclaw/internal/plugin/homeassistant"
@@ -246,72 +249,116 @@ func runRun(ctx context.Context) error {
 	}()
 
 	// ---------------------------------------------------------------
+	// Setup notification dispatcher
+	// ---------------------------------------------------------------
+	dispatcher := notify.NewDispatcher()
+	if cfg.Notifications.Webhook != nil {
+		dispatcher.Register(notify.NewWebhook(cfg.Notifications.Webhook.URL, cfg.Notifications.Webhook.Headers))
+	}
+	if cfg.Notifications.Telegram != nil {
+		dispatcher.Register(notify.NewTelegram(cfg.Notifications.Telegram.BotToken, cfg.Notifications.Telegram.ChatID))
+	}
+	if cfg.Notifications.Slack != nil {
+		dispatcher.Register(notify.NewSlack(cfg.Notifications.Slack.WebhookURL))
+	}
+
+	// Build condition -> actions lookup from config
+	cameraNames := make(map[string]string) // cameraID -> display name
+	for _, cam := range cfg.Cameras {
+		cameraNames[cam.ID] = cam.Name
+		for _, cond := range cam.Conditions {
+			if len(cond.Actions) > 0 {
+				dispatcher.SetActions(cam.ID, cond.ID, cond.Actions)
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------
 	// Start trio-core watch manager (SSE streams for all cameras)
 	// ---------------------------------------------------------------
-	if len(cfg.Cameras) > 0 {
-		tcClient := triocore.NewClient(cfg.TrioCore.URL)
-		watchMgr := triocore.NewManager(tcClient, cfg.Cameras)
+	tcClient := triocore.NewClient(cfg.TrioCore.URL)
+	watchMgr := triocore.NewManager(tcClient, cfg.Cameras)
 
-		// Store all results in SQLite
-		watchMgr.OnResult(func(cameraID string, result triocore.ResultEvent) {
-			for _, cond := range result.Conditions {
-				_, err := eventStore.InsertEvent(&store.Event{
-					Timestamp:   parseTS(result.Timestamp),
-					CameraID:    cameraID,
-					WatchID:     result.WatchID,
-					ConditionID: cond.ID,
-					Answer:      cond.Answer,
-					Triggered:   cond.Triggered,
-					LatencyMs:   result.Metrics.LatencyMs,
-					FramesUsed:  result.Metrics.FramesAnalyzed,
-				})
-				if err != nil {
-					log.Printf("[store] insert result error: %v", err)
-				}
+	// Store all results in SQLite
+	watchMgr.OnResult(func(cameraID string, result triocore.ResultEvent) {
+		for _, cond := range result.Conditions {
+			_, err := eventStore.InsertEvent(&store.Event{
+				Timestamp:   parseTS(result.Timestamp),
+				CameraID:    cameraID,
+				WatchID:     result.WatchID,
+				ConditionID: cond.ID,
+				Answer:      cond.Answer,
+				Triggered:   cond.Triggered,
+				LatencyMs:   result.Metrics.LatencyMs,
+				FramesUsed:  result.Metrics.FramesAnalyzed,
+			})
+			if err != nil {
+				log.Printf("[store] insert result error: %v", err)
 			}
-		})
+		}
+	})
 
-		// Store alerts + push to gateway as proactive events
-		watchMgr.OnAlert(func(cameraID string, alert triocore.AlertEvent) {
-			for _, cond := range alert.Conditions {
-				if !cond.Triggered {
-					continue
-				}
-				_, err := eventStore.InsertAlert(&store.Event{
-					Timestamp:   parseTS(alert.Timestamp),
-					CameraID:    cameraID,
-					WatchID:     alert.WatchID,
-					ConditionID: cond.ID,
-					Answer:      cond.Answer,
-					Triggered:   true,
-					LatencyMs:   alert.Metrics.LatencyMs,
-					FramesUsed:  alert.Metrics.FramesAnalyzed,
-				})
-				if err != nil {
-					log.Printf("[store] insert alert error: %v", err)
-				}
+	// Store alerts + notify + push to gateway
+	watchMgr.OnAlert(func(cameraID string, alert triocore.AlertEvent) {
+		// Decode frame for notifications
+		var frameJPEG []byte
+		if alert.FrameB64 != "" {
+			frameJPEG, _ = base64.StdEncoding.DecodeString(alert.FrameB64)
+		}
+
+		for _, cond := range alert.Conditions {
+			if !cond.Triggered {
+				continue
 			}
 
-			// Push alert to OpenClaw gateway (if connected)
-			if gwClient != nil {
-				_ = gwClient.SendEvent("vision.alert", map[string]any{
-					"camera_id":  cameraID,
-					"watch_id":   alert.WatchID,
-					"ts":         alert.Timestamp,
-					"conditions": alert.Conditions,
-					"frame_b64":  alert.FrameB64,
-				})
+			// Store in SQLite
+			_, err := eventStore.InsertAlert(&store.Event{
+				Timestamp:   parseTS(alert.Timestamp),
+				CameraID:    cameraID,
+				WatchID:     alert.WatchID,
+				ConditionID: cond.ID,
+				Answer:      cond.Answer,
+				Triggered:   true,
+				LatencyMs:   alert.Metrics.LatencyMs,
+				FramesUsed:  alert.Metrics.FramesAnalyzed,
+			})
+			if err != nil {
+				log.Printf("[store] insert alert error: %v", err)
 			}
-		})
 
-		// Run watch manager in background
-		go func() {
-			if err := watchMgr.Run(ctx); err != nil {
-				log.Printf("[watch-manager] error: %v", err)
-			}
-		}()
-		fmt.Println("\nstarted watch manager")
-	}
+			// Dispatch notifications
+			dispatcher.DispatchForCondition(ctx, cameraID, cond.ID, notify.Alert{
+				CameraID:    cameraID,
+				CameraName:  cameraNames[cameraID],
+				ConditionID: cond.ID,
+				Answer:      cond.Answer,
+				Timestamp:   parseTS(alert.Timestamp),
+				FrameJPEG:   frameJPEG,
+			})
+		}
+
+		// Push alert to OpenClaw gateway (if connected)
+		if gwClient != nil {
+			_ = gwClient.SendEvent("vision.alert", map[string]any{
+				"camera_id":  cameraID,
+				"watch_id":   alert.WatchID,
+				"ts":         alert.Timestamp,
+				"conditions": alert.Conditions,
+				"frame_b64":  alert.FrameB64,
+			})
+		}
+	})
+
+	// Pass watch manager to gateway handler
+	handler.SetWatchManager(watchMgr)
+
+	// Run watch manager in background
+	go func() {
+		if err := watchMgr.Run(ctx); err != nil {
+			log.Printf("[watch-manager] error: %v", err)
+		}
+	}()
+	fmt.Println("\nstarted watch manager")
 
 	// ---------------------------------------------------------------
 	// Start OpenClaw gateway connection (if paired)
@@ -925,12 +972,15 @@ func init() {
 
 // nodeCapabilities returns caps and commands to advertise during pairing.
 func nodeCapabilities() (caps []string, commands []string) {
-	caps = []string{"camera", "device"}
+	caps = []string{"camera", "vision", "device"}
 	commands = []string{
 		"camera.snap",
 		"camera.list",
 		"camera.clip",
 		"vision.analyze",
+		"vision.watch",
+		"vision.watch.stop",
+		"vision.status",
 		"device.list",
 		"device.control",
 	}

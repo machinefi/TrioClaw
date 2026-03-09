@@ -181,6 +181,55 @@ type VisionAnalyzeResult struct {
 }
 
 // =============================================================================
+// Vision watch invoke params (TrioClaw continuous monitoring)
+// =============================================================================
+
+// VisionWatchParams is the params for "vision.watch" invoke.
+type VisionWatchParams struct {
+	CameraID   string                  `json:"cameraId"`            // user-chosen ID
+	Source     string                  `json:"source"`              // RTSP URL or device path
+	Conditions []VisionWatchCondition  `json:"conditions"`
+	FPS        int                     `json:"fps,omitempty"`       // default 1
+}
+
+// VisionWatchCondition defines a condition for vision.watch.
+type VisionWatchCondition struct {
+	ID       string   `json:"id"`
+	Question string   `json:"question"`
+	Actions  []string `json:"actions,omitempty"` // notification channels
+}
+
+// VisionWatchResult is the result for "vision.watch".
+type VisionWatchResult struct {
+	CameraID string `json:"cameraId"`
+	Status   string `json:"status"` // "started"
+}
+
+// VisionWatchStopParams is the params for "vision.watch.stop".
+type VisionWatchStopParams struct {
+	CameraID string `json:"cameraId"`
+}
+
+// VisionWatchStopResult is the result for "vision.watch.stop".
+type VisionWatchStopResult struct {
+	CameraID string `json:"cameraId"`
+	Status   string `json:"status"` // "stopped"
+}
+
+// VisionStatusEntry describes one active watch.
+type VisionStatusEntry struct {
+	CameraID string `json:"cameraId"`
+	WatchID  string `json:"watchId"`
+	Source   string `json:"source"`
+	State    string `json:"state"`
+}
+
+// VisionStatusResult is the result for "vision.status".
+type VisionStatusResult struct {
+	Watches []VisionStatusEntry `json:"watches"`
+}
+
+// =============================================================================
 // Device control invoke params (TrioClaw "Hands" commands)
 // =============================================================================
 

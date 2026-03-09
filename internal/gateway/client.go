@@ -523,13 +523,18 @@ func (c *Client) closeConnection() {
 
 // nodeCapabilities returns caps + commands to advertise to the gateway.
 func nodeCapabilities() (caps []string, commands []string) {
-	caps = []string{"camera"}
+	caps = []string{"camera", "vision", "device"}
 
 	commands = []string{
-		"camera.snap",    // standard: capture a photo
-		"camera.list",    // standard: list cameras
-		"camera.clip",    // standard: record video clip
-		"vision.analyze", // trioclaw: snap + VLM analysis
+		"camera.snap",
+		"camera.list",
+		"camera.clip",
+		"vision.analyze",
+		"vision.watch",
+		"vision.watch.stop",
+		"vision.status",
+		"device.list",
+		"device.control",
 	}
 	return
 }
